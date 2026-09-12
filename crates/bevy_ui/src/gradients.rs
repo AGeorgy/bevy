@@ -7,6 +7,9 @@ use bevy_text::{EmSize, RemSize};
 use bevy_utils::default;
 use core::{f32, f32::consts::TAU};
 
+mod mesh_gradient;
+pub use mesh_gradient::*;
+
 /// A color stop for a gradient
 #[derive(Debug, Copy, Clone, PartialEq, Reflect)]
 #[reflect(Default, PartialEq, Debug)]

@@ -57,11 +57,14 @@ tracing = { version = "0.1", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 bevy_core_pipeline = { path = "../bevy_core_pipeline", version = "0.20.0-dev" }
+proptest = "1"
+ron = "0.12"
 
 [features]
 default = []
 serialize = [
   "serde",
+  "bevy_color/serialize",
   "smallvec/serde",
   "bevy_math/serialize",
   "bevy_platform/serialize",
