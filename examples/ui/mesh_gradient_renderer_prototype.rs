@@ -39,12 +39,12 @@ const SPACES: [InterpolationColorSpace; 3] = [
     InterpolationColorSpace::LinearRgba,
 ];
 const LABELS: [&str; 6] = [
-    "3×3 · 4 subdivisions (coarse)",
-    "3×3 · 16 subdivisions",
-    "3×3 · 64 subdivisions (reference)",
-    "4×4 · alpha over linear gradient",
-    "3×3 · asymmetric rounded border",
-    "3×3 · transform + ancestor clipping",
+    "3x3 / 4 subdivisions (coarse)",
+    "3x3 / 16 subdivisions",
+    "3x3 / 64 subdivisions (reference)",
+    "4x4 / alpha over linear gradient",
+    "3x3 / asymmetric rounded border",
+    "3x3 / transform + ancestor clipping",
 ];
 
 fn main() {
@@ -60,7 +60,10 @@ fn main() {
         .insert_resource(Experiment {
             frame: 0,
             animate: args.iter().any(|a| a == "--animate"),
-            space: 0,
+            space: value("--space")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0)
+                .min(SPACES.len() - 1),
             elapsed: 0.,
             capture: value("--capture"),
             attempt_fold: args.iter().any(|a| a == "--attempt-fold"),
@@ -73,7 +76,7 @@ fn main() {
         })
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "Mesh gradient · renderer prototype".into(),
+                title: "Mesh gradient / renderer prototype".into(),
                 resolution: (1160, 820).into(),
                 present_mode: bevy::window::PresentMode::AutoVsync,
                 ..default()
@@ -130,13 +133,16 @@ fn points(n: usize, kind: usize, space: usize) -> Vec<Point> {
         .collect()
 }
 fn transport(surface: &MeshSurface, subdivisions: usize, space: usize) -> Gradient {
-    let (vertices, indices) = surface.tessellate(subdivisions);
+    let (width, height) = surface.dimensions();
     PrototypeMeshGradient {
-        vertices: vertices
-            .into_iter()
-            .map(|v| (Vec2::from_array(v.position), v.color))
+        points: surface
+            .points()
+            .iter()
+            .map(|point| (Vec2::from_array(point.position), point.color))
             .collect(),
-        indices,
+        width: width as u32,
+        height: height as u32,
+        subdivisions: subdivisions as u32,
         color_space: SPACES[space],
     }
     .into()
@@ -148,7 +154,7 @@ fn underlay() -> Gradient {
     ])
     .into()
 }
-fn setup(mut commands: Commands) {
+fn setup(mut commands: Commands, ex: Res<Experiment>) {
     commands.spawn(Camera2d);
     commands.spawn((
         Text::new("MESH GRADIENT / RENDERER PROTOTYPE"),
@@ -164,7 +170,7 @@ fn setup(mut commands: Commands) {
             ..default()
         },
     ));
-    commands.spawn((Text::new("Same inferred cubic surface · direct UI triangles · 3 color spaces · validity-preserving edits"),TextFont {font_size:FontSize::Px(16.),..default()},TextColor(Color::srgb(0.62,0.69,0.78)),Node {position_type:PositionType::Absolute,left:px(30),top:px(56),..default()}));
+    commands.spawn((Text::new("GPU-evaluated geometry and color / point-only edits / 3 color spaces / checked surfaces"),TextFont {font_size:FontSize::Px(16.),..default()},TextColor(Color::srgb(0.62,0.69,0.78)),Node {position_type:PositionType::Absolute,left:px(30),top:px(56),..default()}));
     for kind in 0..6 {
         let left = 30. + (kind % 3) as f32 * 374.;
         let top = 108. + (kind / 3) as f32 * 305.;
@@ -188,9 +194,9 @@ fn setup(mut commands: Commands) {
             2 => 64,
             _ => 16,
         };
-        let base = points(n, kind, 0);
+        let base = points(n, kind, ex.space);
         let surface = MeshSurface::try_new(n, n, base.clone()).expect("preset must certify");
-        let gradient = transport(&surface, subdivisions, 0);
+        let gradient = transport(&surface, subdivisions, ex.space);
         let parent = commands
             .spawn((
                 Node {
@@ -343,7 +349,7 @@ fn update(
         ex.update_us.push(start.elapsed().as_secs_f64() * 1e6);
     }
     if let Ok(mut text) = hud.single_mut() {
-        text.0=format!("SPACE animate ({})   C color ({:?})   F attempt fold   R reset   S screenshot\n{}\nPrototype transport is raw; the checked surface model owns validation. WebGL2 build passes; browser execution is unverified.",ex.animate,SPACES[ex.space],ex.status);
+        text.0=format!("SPACE animate ({})   C color ({:?})   F attempt fold   R reset   S screenshot\n{}\nEdits upload control points; shaders evaluate geometry and color. WebGL2 build passes; browser execution is unverified.",ex.animate,SPACES[ex.space],ex.status);
     }
     let screenshot =
         keys.just_pressed(KeyCode::KeyS) || (ex.capture.is_some() && ex.frame == ex.frames);

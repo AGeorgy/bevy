@@ -486,7 +486,7 @@ impl Gradient {
             Gradient::Linear(gradient) => gradient.stops.is_empty(),
             Gradient::Radial(gradient) => gradient.stops.is_empty(),
             Gradient::Conic(gradient) => gradient.stops.is_empty(),
-            Gradient::PrototypeMesh(gradient) => gradient.indices.is_empty(),
+            Gradient::PrototypeMesh(gradient) => gradient.points.is_empty(),
         }
     }
 
@@ -520,7 +520,7 @@ impl Gradient {
     }
 }
 
-/// Throwaway transport for testing CPU tessellation through the UI gradient pipeline.
+/// Throwaway transport for testing shader-evaluated mesh interpolation through the UI pipeline.
 ///
 /// This deliberately exposes raw buffers and is NOT the proposed invariant-preserving
 /// mesh-gradient authoring API. It does not certify curved-surface injectivity.
@@ -532,11 +532,15 @@ impl Gradient {
     reflect(Serialize, Deserialize)
 )]
 pub struct PrototypeMeshGradient {
-    /// Normalized node-relative positions and colors in `color_space` coordinates.
-    pub vertices: Vec<(Vec2, [f32; 4])>,
-    /// Triangle-list vertex indices.
-    pub indices: Vec<u32>,
-    /// The interpolation coordinates supplied by `vertices`.
+    /// Row-major normalized node-relative positions and colors in `color_space` coordinates.
+    pub points: Vec<(Vec2, [f32; 4])>,
+    /// Number of points in each row.
+    pub width: u32,
+    /// Number of point rows.
+    pub height: u32,
+    /// Reusable parameter-grid subdivisions per patch in this experiment.
+    pub subdivisions: u32,
+    /// The interpolation coordinates supplied by `points`.
     /// Only OKLab, sRGB, and linear RGB are supported by this experiment.
     pub color_space: InterpolationColorSpace,
 }

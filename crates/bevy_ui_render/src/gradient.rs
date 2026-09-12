@@ -43,6 +43,8 @@ use bytemuck::{Pod, Zeroable};
 
 // Must match PROTOTYPE_MESH in gradient.wesl; 4096 is reserved for INVERT.
 const PROTOTYPE_MESH_FLAG: u32 = 8192;
+const PROTOTYPE_MAX_POINTS: usize = 16;
+const PROTOTYPE_MAX_CLIPS: usize = 4;
 
 pub struct GradientPlugin;
 
@@ -79,11 +81,30 @@ pub struct GradientBatch {
     pub range: Range<u32>,
 }
 
+#[derive(Component)]
+pub struct PrototypeMeshUniformOffset(u32);
+
+#[derive(Clone, Default, ShaderType)]
+struct PrototypeMeshUniform {
+    positions: [Vec4; PROTOTYPE_MAX_POINTS],
+    colors: [Vec4; PROTOTYPE_MAX_POINTS],
+    transform_x: Vec4,
+    transform_y: Vec4,
+    size_and_dimensions: Vec4,
+    clip_rects: [Vec4; PROTOTYPE_MAX_CLIPS],
+    clip_x: [Vec4; PROTOTYPE_MAX_CLIPS],
+    clip_y: [Vec4; PROTOTYPE_MAX_CLIPS],
+    clip_count: Vec4,
+}
+
 #[derive(Resource)]
 pub struct GradientMeta {
     vertices: RawBufferVec<UiGradientVertex>,
     indices: RawBufferVec<u32>,
     view_bind_group: Option<BindGroup>,
+    mesh_uniforms: DynamicUniformBuffer<PrototypeMeshUniform>,
+    mesh_bind_group: Option<BindGroup>,
+    default_mesh_offset: u32,
 }
 
 impl Default for GradientMeta {
@@ -92,6 +113,9 @@ impl Default for GradientMeta {
             vertices: RawBufferVec::new(BufferUsages::VERTEX),
             indices: RawBufferVec::new(BufferUsages::INDEX),
             view_bind_group: None,
+            mesh_uniforms: DynamicUniformBuffer::default(),
+            mesh_bind_group: None,
+            default_mesh_offset: 0,
         }
     }
 }
@@ -99,6 +123,7 @@ impl Default for GradientMeta {
 #[derive(Resource)]
 pub struct GradientPipeline {
     pub view_layout: BindGroupLayoutDescriptor,
+    pub mesh_layout: BindGroupLayoutDescriptor,
     pub shader: Handle<Shader>,
 }
 
@@ -110,9 +135,17 @@ pub fn init_gradient_pipeline(mut commands: Commands, asset_server: Res<AssetSer
             uniform_buffer::<ViewUniform>(true),
         ),
     );
+    let mesh_layout = BindGroupLayoutDescriptor::new(
+        "ui_gradient_prototype_mesh_layout",
+        &BindGroupLayoutEntries::single(
+            ShaderStages::VERTEX_FRAGMENT,
+            uniform_buffer::<PrototypeMeshUniform>(true),
+        ),
+    );
 
     commands.insert_resource(GradientPipeline {
         view_layout,
+        mesh_layout,
         shader: load_embedded_asset!(asset_server.as_ref(), "gradient.wesl"),
     });
 }
@@ -220,7 +253,7 @@ impl SpecializedRenderPipeline for GradientPipeline {
                 })],
                 ..default()
             }),
-            layout: vec![self.view_layout.clone()],
+            layout: vec![self.view_layout.clone(), self.mesh_layout.clone()],
             label: Some("ui_gradient_pipeline".into()),
             ..default()
         }
@@ -229,8 +262,10 @@ impl SpecializedRenderPipeline for GradientPipeline {
 
 pub enum ResolvedGradient {
     PrototypeMesh {
-        vertices: Vec<(Vec2, [f32; 4])>,
-        indices: Vec<u32>,
+        points: Vec<(Vec2, [f32; 4])>,
+        width: u32,
+        height: u32,
+        subdivisions: u32,
     },
     Linear {
         angle: f32,
@@ -526,13 +561,12 @@ pub fn extract_gradients(
                             InterpolationColorSpace::Oklaba
                                 | InterpolationColorSpace::Srgba
                                 | InterpolationColorSpace::LinearRgba
-                        ) || mesh.indices.len() % 3 != 0
+                        ) || !(2..=4).contains(&mesh.width)
+                            || !(2..=4).contains(&mesh.height)
+                            || mesh.width as usize * mesh.height as usize != mesh.points.len()
+                            || !(1..=64).contains(&mesh.subdivisions)
                             || mesh
-                                .indices
-                                .iter()
-                                .any(|&i| i as usize >= mesh.vertices.len())
-                            || mesh
-                                .vertices
+                                .points
                                 .iter()
                                 .any(|(p, c)| !p.is_finite() || c.iter().any(|v| !v.is_finite()))
                         {
@@ -558,8 +592,10 @@ pub fn extract_gradients(
                                     border_radius: uinode.border_radius,
                                     border: uinode.border,
                                     resolved_gradient: ResolvedGradient::PrototypeMesh {
-                                        vertices: mesh.vertices.clone(),
-                                        indices: mesh.indices.clone(),
+                                        points: mesh.points.clone(),
+                                        width: mesh.width,
+                                        height: mesh.height,
+                                        subdivisions: mesh.subdivisions,
                                     },
                                     color_space: mesh.color_space,
                                 },
@@ -919,6 +955,7 @@ pub fn prepare_gradient(
         // Buffer indexes
         let mut vertices_index = 0;
         let mut indices_index = 0;
+        let mut prototype_uniforms = Vec::new();
 
         for ui_phase in phases.values_mut() {
             for item_index in 0..ui_phase.items.len() {
@@ -946,64 +983,117 @@ pub fn prepare_gradient(
                         0
                     };
 
-                    if let ResolvedGradient::PrototypeMesh { vertices, indices } =
-                        &gradient.resolved_gradient
+                    if let ResolvedGradient::PrototypeMesh {
+                        points,
+                        width,
+                        height,
+                        subdivisions,
+                    } = &gradient.resolved_gradient
                     {
                         if !rect_size.is_finite() || rect_size.min_element() <= 0. {
                             continue;
                         }
+                        let mut uniform = PrototypeMeshUniform::default();
+                        for (index, (position, color)) in points.iter().enumerate() {
+                            uniform.positions[index] = position.extend(0.).extend(0.);
+                            uniform.colors[index] = Vec4::from_array(*color);
+                        }
+                        let transform = gradient.transform;
+                        uniform.transform_x = Vec4::new(
+                            transform.matrix2.x_axis.x,
+                            transform.matrix2.y_axis.x,
+                            transform.translation.x,
+                            0.,
+                        );
+                        uniform.transform_y = Vec4::new(
+                            transform.matrix2.x_axis.y,
+                            transform.matrix2.y_axis.y,
+                            transform.translation.y,
+                            0.,
+                        );
+                        uniform.size_and_dimensions =
+                            Vec4::new(rect_size.x, rect_size.y, *width as f32, *height as f32);
+                        if let Some(clip) = gradient.clip.as_ref() {
+                            let Some(rects) = clip.rects() else {
+                                continue;
+                            };
+                            if rects.len() > PROTOTYPE_MAX_CLIPS {
+                                continue;
+                            }
+                            uniform.clip_count.x = rects.len() as f32;
+                            for (index, region) in rects.iter().enumerate() {
+                                uniform.clip_rects[index] = Vec4::new(
+                                    region.rect.min.x,
+                                    region.rect.min.y,
+                                    region.rect.max.x,
+                                    region.rect.max.y,
+                                );
+                                uniform.clip_x[index] = Vec4::new(
+                                    region.world_to_clip_local.matrix2.x_axis.x,
+                                    region.world_to_clip_local.matrix2.y_axis.x,
+                                    region.world_to_clip_local.translation.x,
+                                    0.,
+                                );
+                                uniform.clip_y[index] = Vec4::new(
+                                    region.world_to_clip_local.matrix2.x_axis.y,
+                                    region.world_to_clip_local.matrix2.y_axis.y,
+                                    region.world_to_clip_local.translation.y,
+                                    0.,
+                                );
+                            }
+                        }
+                        prototype_uniforms.push((item.entity(), uniform));
+
                         let batch_start = vertices_index;
-                        for triangle in indices.chunks_exact(3) {
-                            let corners = [triangle[0], triangle[1], triangle[2]].map(|index| {
-                                let (normalized, color) = vertices[index as usize];
-                                let point = (normalized - Vec2::splat(0.5)) * rect_size;
-                                (
-                                    gradient.transform.transform_point2(point),
-                                    (point, Vec4::from_array(color)),
-                                )
-                            });
-                            if corners.iter().any(|(position, (point, _))| {
-                                !position.is_finite() || !point.is_finite()
-                            }) {
-                                continue;
+                        let subdivisions = *subdivisions as usize;
+                        for cell_y in 0..*height as usize - 1 {
+                            for cell_x in 0..*width as usize - 1 {
+                                let base = indices_index;
+                                let stride = subdivisions as u32 + 1;
+                                for j in 0..=subdivisions {
+                                    for i in 0..=subdivisions {
+                                        ui_meta.vertices.push(UiGradientVertex {
+                                            position: [0.; 3],
+                                            uv: [
+                                                i as f32 / subdivisions as f32,
+                                                j as f32 / subdivisions as f32,
+                                            ],
+                                            flags: flags | PROTOTYPE_MESH_FLAG,
+                                            radius: gradient.border_radius.into(),
+                                            border: [
+                                                gradient.border.min_inset.x,
+                                                gradient.border.min_inset.y,
+                                                gradient.border.max_inset.x,
+                                                gradient.border.max_inset.y,
+                                            ],
+                                            size: rect_size.into(),
+                                            point: [0.; 2],
+                                            g_start: [cell_x as f32, cell_y as f32],
+                                            g_dir: [0.; 2],
+                                            start_color: [0.; 4],
+                                            start_len: 0.,
+                                            end_len: 1.,
+                                            end_color: [0.; 4],
+                                            hint: 0.5,
+                                        });
+                                    }
+                                }
+                                for j in 0..subdivisions {
+                                    for i in 0..subdivisions {
+                                        let a = base + j as u32 * stride + i as u32;
+                                        ui_meta.indices.extend([
+                                            a,
+                                            a + 1,
+                                            a + stride,
+                                            a + 1,
+                                            a + stride + 1,
+                                            a + stride,
+                                        ]);
+                                        vertices_index += 6;
+                                    }
+                                }
+                                indices_index += stride * stride;
                             }
-                            let clipped =
-                                clip_polygon(gradient.clip.as_ref(), &corners, |a, b, t| {
-                                    (a.0.lerp(b.0, t), a.1.lerp(b.1, t))
-                                });
-                            if clipped.len() < 3 {
-                                continue;
-                            }
-                            for &(position, (point, color)) in &clipped {
-                                ui_meta.vertices.push(UiGradientVertex {
-                                    position: position.extend(0.).into(),
-                                    uv: (point / rect_size + Vec2::splat(0.5)).into(),
-                                    flags: flags | PROTOTYPE_MESH_FLAG,
-                                    radius: gradient.border_radius.into(),
-                                    border: [
-                                        gradient.border.min_inset.x,
-                                        gradient.border.min_inset.y,
-                                        gradient.border.max_inset.x,
-                                        gradient.border.max_inset.y,
-                                    ],
-                                    size: rect_size.into(),
-                                    point: point.into(),
-                                    g_start: [0.; 2],
-                                    g_dir: [0.; 2],
-                                    start_color: color.to_array(),
-                                    start_len: 0.,
-                                    end_len: 1.,
-                                    end_color: [0.; 4],
-                                    hint: 0.5,
-                                });
-                            }
-                            for i in 1..clipped.len() as u32 - 1 {
-                                ui_meta.indices.push(indices_index);
-                                ui_meta.indices.push(indices_index + i);
-                                ui_meta.indices.push(indices_index + i + 1);
-                                vertices_index += 3;
-                            }
-                            indices_index += clipped.len() as u32;
                         }
                         if vertices_index > batch_start {
                             batches.push((
@@ -1128,14 +1218,44 @@ pub fn prepare_gradient(
                 }
             }
         }
+        let mut uniform_offsets = Vec::with_capacity(prototype_uniforms.len());
+        let default_mesh_offset = if let Some(mut writer) = ui_meta.mesh_uniforms.get_writer(
+            prototype_uniforms.len() + 1,
+            &render_device,
+            &render_queue,
+        ) {
+            let default_offset = writer.write(&PrototypeMeshUniform::default());
+            for (entity, uniform) in &prototype_uniforms {
+                uniform_offsets.push((*entity, PrototypeMeshUniformOffset(writer.write(uniform))));
+            }
+            Some(default_offset)
+        } else {
+            None
+        };
+        if let Some(offset) = default_mesh_offset {
+            ui_meta.default_mesh_offset = offset;
+        }
+        if let Some(binding) = ui_meta.mesh_uniforms.binding() {
+            ui_meta.mesh_bind_group = Some(render_device.create_bind_group(
+                "gradient_prototype_mesh_bind_group",
+                &pipeline_cache.get_bind_group_layout(&gradients_pipeline.mesh_layout),
+                &BindGroupEntries::single(binding),
+            ));
+        }
         ui_meta.vertices.write_buffer(&render_device, &render_queue);
         ui_meta.indices.write_buffer(&render_device, &render_queue);
         *previous_len = batches.len();
+        commands.try_insert_batch(uniform_offsets);
         commands.try_insert_batch(batches);
     }
 }
 
-pub type DrawGradientFns = (SetItemPipeline, SetGradientViewBindGroup<0>, DrawGradient);
+pub type DrawGradientFns = (
+    SetItemPipeline,
+    SetGradientViewBindGroup<0>,
+    SetGradientMeshBindGroup<1>,
+    DrawGradient,
+);
 
 pub struct SetGradientViewBindGroup<const I: usize>;
 impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetGradientViewBindGroup<I> {
@@ -1154,6 +1274,31 @@ impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetGradientViewBindGroup
             return RenderCommandResult::Failure("view_bind_group not available");
         };
         pass.set_bind_group(I, view_bind_group, &[view_uniform.offset]);
+        RenderCommandResult::Success
+    }
+}
+
+pub struct SetGradientMeshBindGroup<const I: usize>;
+impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetGradientMeshBindGroup<I> {
+    type Param = SRes<GradientMeta>;
+    type ViewQuery = ();
+    type ItemQuery = Option<Read<PrototypeMeshUniformOffset>>;
+
+    fn render<'w>(
+        _item: &P,
+        _view: (),
+        offset: Option<Option<&'w PrototypeMeshUniformOffset>>,
+        ui_meta: SystemParamItem<'w, '_, Self::Param>,
+        pass: &mut TrackedRenderPass<'w>,
+    ) -> RenderCommandResult {
+        let ui_meta = ui_meta.into_inner();
+        let Some(bind_group) = ui_meta.mesh_bind_group.as_ref() else {
+            return RenderCommandResult::Failure("mesh_bind_group not available");
+        };
+        let offset = offset
+            .flatten()
+            .map_or(ui_meta.default_mesh_offset, |offset| offset.0);
+        pass.set_bind_group(I, bind_group, &[offset]);
         RenderCommandResult::Success
     }
 }

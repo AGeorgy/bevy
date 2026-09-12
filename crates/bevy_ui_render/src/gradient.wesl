@@ -45,6 +45,163 @@ fn enabled(flags: u32, mask: u32) -> bool {
 
 @group(0) @binding(0) var<uniform> view: View;
 
+struct PrototypeMeshUniform {
+    positions: array<vec4<f32>, 16>,
+    colors: array<vec4<f32>, 16>,
+    transform_x: vec4<f32>,
+    transform_y: vec4<f32>,
+    size_and_dimensions: vec4<f32>,
+    clip_rects: array<vec4<f32>, 4>,
+    clip_x: array<vec4<f32>, 4>,
+    clip_y: array<vec4<f32>, 4>,
+    clip_count: vec4<f32>,
+};
+
+@group(1) @binding(0) var<uniform> prototype_mesh: PrototypeMeshUniform;
+
+fn prototype_index(x: i32, y: i32) -> u32 {
+    return u32(y * i32(prototype_mesh.size_and_dimensions.z) + x);
+}
+
+fn prototype_position_row(x: i32, y: i32) -> vec4<f32> {
+    let width = i32(prototype_mesh.size_and_dimensions.z);
+    if x < 0 {
+        return 2. * prototype_mesh.positions[prototype_index(0, y)]
+            - prototype_mesh.positions[prototype_index(1, y)];
+    }
+    if x >= width {
+        return 2. * prototype_mesh.positions[prototype_index(width - 1, y)]
+            - prototype_mesh.positions[prototype_index(width - 2, y)];
+    }
+    return prototype_mesh.positions[prototype_index(x, y)];
+}
+
+fn prototype_color_row(x: i32, y: i32) -> vec4<f32> {
+    let width = i32(prototype_mesh.size_and_dimensions.z);
+    if x < 0 {
+        return 2. * prototype_mesh.colors[prototype_index(0, y)]
+            - prototype_mesh.colors[prototype_index(1, y)];
+    }
+    if x >= width {
+        return 2. * prototype_mesh.colors[prototype_index(width - 1, y)]
+            - prototype_mesh.colors[prototype_index(width - 2, y)];
+    }
+    return prototype_mesh.colors[prototype_index(x, y)];
+}
+
+fn prototype_position_at(x: i32, y: i32) -> vec4<f32> {
+    let height = i32(prototype_mesh.size_and_dimensions.w);
+    if y < 0 {
+        return 2. * prototype_position_row(x, 0) - prototype_position_row(x, 1);
+    }
+    if y >= height {
+        return 2. * prototype_position_row(x, height - 1)
+            - prototype_position_row(x, height - 2);
+    }
+    return prototype_position_row(x, y);
+}
+
+fn prototype_color_at(x: i32, y: i32) -> vec4<f32> {
+    let height = i32(prototype_mesh.size_and_dimensions.w);
+    if y < 0 {
+        return 2. * prototype_color_row(x, 0) - prototype_color_row(x, 1);
+    }
+    if y >= height {
+        return 2. * prototype_color_row(x, height - 1)
+            - prototype_color_row(x, height - 2);
+    }
+    return prototype_color_row(x, y);
+}
+
+fn prototype_catmull(
+    p0: vec4<f32>,
+    p1: vec4<f32>,
+    p2: vec4<f32>,
+    p3: vec4<f32>,
+    t: f32,
+) -> vec4<f32> {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    return 0.5 * (
+        2. * p1
+        + (-p0 + p2) * t
+        + (2. * p0 - 5. * p1 + 4. * p2 - p3) * t2
+        + (-p0 + 3. * p1 - 3. * p2 + p3) * t3
+    );
+}
+
+fn prototype_position(cell: vec2<f32>, uv: vec2<f32>) -> vec2<f32> {
+    let x = i32(cell.x);
+    let y = i32(cell.y);
+    let rows = array<vec4<f32>, 4>(
+        prototype_catmull(
+            prototype_position_at(x - 1, y - 1),
+            prototype_position_at(x, y - 1),
+            prototype_position_at(x + 1, y - 1),
+            prototype_position_at(x + 2, y - 1),
+            uv.x,
+        ),
+        prototype_catmull(
+            prototype_position_at(x - 1, y),
+            prototype_position_at(x, y),
+            prototype_position_at(x + 1, y),
+            prototype_position_at(x + 2, y),
+            uv.x,
+        ),
+        prototype_catmull(
+            prototype_position_at(x - 1, y + 1),
+            prototype_position_at(x, y + 1),
+            prototype_position_at(x + 1, y + 1),
+            prototype_position_at(x + 2, y + 1),
+            uv.x,
+        ),
+        prototype_catmull(
+            prototype_position_at(x - 1, y + 2),
+            prototype_position_at(x, y + 2),
+            prototype_position_at(x + 1, y + 2),
+            prototype_position_at(x + 2, y + 2),
+            uv.x,
+        ),
+    );
+    return prototype_catmull(rows[0], rows[1], rows[2], rows[3], uv.y).xy;
+}
+
+fn prototype_color(cell: vec2<f32>, uv: vec2<f32>) -> vec4<f32> {
+    let x = i32(cell.x);
+    let y = i32(cell.y);
+    let rows = array<vec4<f32>, 4>(
+        prototype_catmull(
+            prototype_color_at(x - 1, y - 1),
+            prototype_color_at(x, y - 1),
+            prototype_color_at(x + 1, y - 1),
+            prototype_color_at(x + 2, y - 1),
+            uv.x,
+        ),
+        prototype_catmull(
+            prototype_color_at(x - 1, y),
+            prototype_color_at(x, y),
+            prototype_color_at(x + 1, y),
+            prototype_color_at(x + 2, y),
+            uv.x,
+        ),
+        prototype_catmull(
+            prototype_color_at(x - 1, y + 1),
+            prototype_color_at(x, y + 1),
+            prototype_color_at(x + 1, y + 1),
+            prototype_color_at(x + 2, y + 1),
+            uv.x,
+        ),
+        prototype_catmull(
+            prototype_color_at(x - 1, y + 2),
+            prototype_color_at(x, y + 2),
+            prototype_color_at(x + 1, y + 2),
+            prototype_color_at(x + 2, y + 2),
+            uv.x,
+        ),
+    );
+    return prototype_catmull(rows[0], rows[1], rows[2], rows[3], uv.y);
+}
+
 struct GradientVertexOutput {
     @location(0) uv: vec2<f32>,
     @location(1) @interpolate(flat) size: vec2<f32>,
@@ -104,13 +261,39 @@ fn vertex(
     out.g_start = g_start;
     out.hint = hint;
 
+    if enabled(flags, PROTOTYPE_MESH) {
+        let normalized = prototype_position(g_start, vertex_uv);
+        let local = (normalized - vec2(0.5)) * size;
+        let world = vec2(
+            dot(prototype_mesh.transform_x.xy, local) + prototype_mesh.transform_x.z,
+            dot(prototype_mesh.transform_y.xy, local) + prototype_mesh.transform_y.z,
+        );
+        out.position = view.clip_from_world * vec4(world, 0., 1.);
+        out.point = local;
+        // Mesh color is evaluated in the fragment shader; carry world position for clipping.
+        out.start_color = vec4(world, 0., 0.);
+    }
+
     return out;
 }
 
 @fragment
 fn fragment(in: GradientVertexOutput) -> @location(0) vec4<f32> {
     if enabled(in.flags, PROTOTYPE_MESH) {
-        let color = convert_to_linear_rgba(in.start_color);
+        for (var i = 0u; i < u32(prototype_mesh.clip_count.x); i += 1u) {
+            let clip_point = vec2(
+                dot(prototype_mesh.clip_x[i].xy, in.start_color.xy) + prototype_mesh.clip_x[i].z,
+                dot(prototype_mesh.clip_y[i].xy, in.start_color.xy) + prototype_mesh.clip_y[i].z,
+            );
+            let rect = prototype_mesh.clip_rects[i];
+            if clip_point.x < rect.x || clip_point.y < rect.y
+                || clip_point.x > rect.z || clip_point.y > rect.w {
+                return vec4(0.);
+            }
+        }
+        var mesh_color = prototype_color(in.g_start, in.uv);
+        mesh_color.a = clamp(mesh_color.a, 0., 1.);
+        let color = convert_to_linear_rgba(mesh_color);
         if enabled(in.flags, BORDER_ANY) {
             return draw_uinode_border(color, in.point, in.size, in.radius_x, in.radius_y, in.border, in.flags);
         }

@@ -5777,6 +5777,6 @@ required-features = ["bevy_ui_render"]
 
 [package.metadata.example.mesh_gradient_renderer_prototype]
 name = "Mesh gradient renderer prototype"
-description = "Throwaway certified mesh-gradient tessellation experiment"
+description = "Throwaway shader-evaluated mesh-gradient experiment"
 category = "UI"
 wasm = true
