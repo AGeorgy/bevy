@@ -5780,3 +5780,14 @@ name = "Mesh gradient renderer prototype"
 description = "Throwaway shader-evaluated mesh-gradient experiment"
 category = "UI"
 wasm = true
+
+[[example]]
+name = "mesh_gradient_editor_prototype"
+path = "examples/ui/mesh_gradient_editor_prototype.rs"
+required-features = ["bevy_ui_render"]
+
+[package.metadata.example.mesh_gradient_editor_prototype]
+name = "Mesh gradient editor prototype"
+description = "Throwaway interaction prototype with three editor layouts"
+category = "UI"
+wasm = true
