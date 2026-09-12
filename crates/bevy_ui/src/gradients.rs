@@ -463,6 +463,8 @@ impl ConicGradient {
     reflect(Serialize, Deserialize)
 )]
 pub enum Gradient {
+    /// Experimental pre-tessellated mesh transport, not the validated public mesh API.
+    PrototypeMesh(PrototypeMeshGradient),
     /// A linear gradient
     ///
     /// <https://developer.mozilla.org/en-US/docs/Web/CSS/gradient/linear-gradient>
@@ -484,12 +486,14 @@ impl Gradient {
             Gradient::Linear(gradient) => gradient.stops.is_empty(),
             Gradient::Radial(gradient) => gradient.stops.is_empty(),
             Gradient::Conic(gradient) => gradient.stops.is_empty(),
+            Gradient::PrototypeMesh(gradient) => gradient.indices.is_empty(),
         }
     }
 
     /// If the gradient has only a single color stop, `get_single` returns its color.
     pub fn get_single(&self) -> Option<Color> {
         match self {
+            Gradient::PrototypeMesh(_) => None,
             Gradient::Linear(gradient) => gradient
                 .stops
                 .first()
@@ -511,7 +515,35 @@ impl Gradient {
             Gradient::Linear(linear_gradient) => linear_gradient.color_space,
             Gradient::Radial(radial_gradient) => radial_gradient.color_space,
             Gradient::Conic(conic_gradient) => conic_gradient.color_space,
+            Gradient::PrototypeMesh(gradient) => gradient.color_space,
         }
+    }
+}
+
+/// Throwaway transport for testing CPU tessellation through the UI gradient pipeline.
+///
+/// This deliberately exposes raw buffers and is NOT the proposed invariant-preserving
+/// mesh-gradient authoring API. It does not certify curved-surface injectivity.
+#[derive(Clone, PartialEq, Debug, Default, Reflect)]
+#[reflect(Default, PartialEq, Debug, Clone)]
+#[cfg_attr(
+    feature = "serialize",
+    derive(serde::Serialize, serde::Deserialize),
+    reflect(Serialize, Deserialize)
+)]
+pub struct PrototypeMeshGradient {
+    /// Normalized node-relative positions and colors in `color_space` coordinates.
+    pub vertices: Vec<(Vec2, [f32; 4])>,
+    /// Triangle-list vertex indices.
+    pub indices: Vec<u32>,
+    /// The interpolation coordinates supplied by `vertices`.
+    /// Only OKLab, sRGB, and linear RGB are supported by this experiment.
+    pub color_space: InterpolationColorSpace,
+}
+
+impl From<PrototypeMeshGradient> for Gradient {
+    fn from(value: PrototypeMeshGradient) -> Self {
+        Self::PrototypeMesh(value)
     }
 }
 

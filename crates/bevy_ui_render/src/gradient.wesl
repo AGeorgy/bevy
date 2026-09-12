@@ -32,6 +32,7 @@ const RADIAL: u32 = 16u;
 const FILL_START: u32 = 32u;
 const FILL_END: u32 = 64u;
 const CONIC: u32 = 128u;
+const PROTOTYPE_MESH: u32 = 8192u;
 const BORDER_LEFT: u32 = 256u;
 const BORDER_TOP: u32 = 512u;
 const BORDER_RIGHT: u32 = 1024u;
@@ -56,7 +57,7 @@ struct GradientVertexOutput {
     @location(6) point: vec2<f32>,
     @location(7) @interpolate(flat) g_start: vec2<f32>,
     @location(8) @interpolate(flat) dir: vec2<f32>,
-    @location(9) @interpolate(flat) start_color: vec4<f32>,
+    @location(9) start_color: vec4<f32>,
     @location(10) @interpolate(flat) start_len: f32,
     @location(11) @interpolate(flat) end_len: f32,
     @location(12) @interpolate(flat) end_color: vec4<f32>,
@@ -80,7 +81,7 @@ fn vertex(
     @location(7) point: vec2<f32>,
     @location(8) @interpolate(flat) g_start: vec2<f32>,
     @location(9) @interpolate(flat) dir: vec2<f32>,
-    @location(10) @interpolate(flat) start_color: vec4<f32>,
+    @location(10) start_color: vec4<f32>,
     @location(11) @interpolate(flat) start_len: f32,
     @location(12) @interpolate(flat) end_len: f32,
     @location(13) @interpolate(flat) end_color: vec4<f32>,
@@ -108,6 +109,13 @@ fn vertex(
 
 @fragment
 fn fragment(in: GradientVertexOutput) -> @location(0) vec4<f32> {
+    if enabled(in.flags, PROTOTYPE_MESH) {
+        let color = convert_to_linear_rgba(in.start_color);
+        if enabled(in.flags, BORDER_ANY) {
+            return draw_uinode_border(color, in.point, in.size, in.radius_x, in.radius_y, in.border, in.flags);
+        }
+        return draw_uinode_background(color, in.point, in.size, in.radius_x, in.radius_y, in.border, in.flags);
+    }
     var g_distance: f32;
     if enabled(in.flags, RADIAL) {
         g_distance = radial_distance(in.point, in.g_start, in.dir.x);

@@ -18,7 +18,7 @@ use bevy_ecs::{
 };
 use bevy_math::{
     ops::{cos, sin},
-    FloatOrd, Rect, Vec2,
+    FloatOrd, Rect, Vec2, Vec4,
 };
 use bevy_math::{Affine2, Vec2Swizzles};
 use bevy_mesh::VertexBufferLayout;
@@ -40,6 +40,9 @@ use bevy_ui::{
 };
 use bevy_utils::default;
 use bytemuck::{Pod, Zeroable};
+
+// Must match PROTOTYPE_MESH in gradient.wesl; 4096 is reserved for INVERT.
+const PROTOTYPE_MESH_FLAG: u32 = 8192;
 
 pub struct GradientPlugin;
 
@@ -225,9 +228,21 @@ impl SpecializedRenderPipeline for GradientPipeline {
 }
 
 pub enum ResolvedGradient {
-    Linear { angle: f32 },
-    Conic { center: Vec2, start: f32 },
-    Radial { center: Vec2, size: Vec2 },
+    PrototypeMesh {
+        vertices: Vec<(Vec2, [f32; 4])>,
+        indices: Vec<u32>,
+    },
+    Linear {
+        angle: f32,
+    },
+    Conic {
+        center: Vec2,
+        start: f32,
+    },
+    Radial {
+        center: Vec2,
+        size: Vec2,
+    },
 }
 
 pub struct ExtractedGradient {
@@ -504,6 +519,52 @@ pub fn extract_gradients(
                     continue;
                 }
                 match gradient {
+                    Gradient::PrototypeMesh(mesh) => {
+                        // Defense against malformed raw experiment buffers, not geometric validation.
+                        if !matches!(
+                            mesh.color_space,
+                            InterpolationColorSpace::Oklaba
+                                | InterpolationColorSpace::Srgba
+                                | InterpolationColorSpace::LinearRgba
+                        ) || mesh.indices.len() % 3 != 0
+                            || mesh
+                                .indices
+                                .iter()
+                                .any(|&i| i as usize >= mesh.vertices.len())
+                            || mesh
+                                .vertices
+                                .iter()
+                                .any(|(p, c)| !p.is_finite() || c.iter().any(|v| !v.is_finite()))
+                        {
+                            continue;
+                        }
+                        extracted_gradients
+                            .items
+                            .entry(main_entity)
+                            .or_insert_with(|| (extracted_camera_entity, Default::default()))
+                            .1
+                            .insert(
+                                commands.spawn_empty().id(),
+                                ExtractedGradient {
+                                    stack_index: stack_index.0,
+                                    transform: transform.into(),
+                                    stops: Vec::new(),
+                                    rect: Rect {
+                                        min: Vec2::ZERO,
+                                        max: uinode.size,
+                                    },
+                                    clip: clip.cloned(),
+                                    node_type,
+                                    border_radius: uinode.border_radius,
+                                    border: uinode.border,
+                                    resolved_gradient: ResolvedGradient::PrototypeMesh {
+                                        vertices: mesh.vertices.clone(),
+                                        indices: mesh.indices.clone(),
+                                    },
+                                    color_space: mesh.color_space,
+                                },
+                            );
+                    }
                     Gradient::Linear(LinearGradient {
                         color_space,
                         angle,
@@ -885,7 +946,78 @@ pub fn prepare_gradient(
                         0
                     };
 
+                    if let ResolvedGradient::PrototypeMesh { vertices, indices } =
+                        &gradient.resolved_gradient
+                    {
+                        if !rect_size.is_finite() || rect_size.min_element() <= 0. {
+                            continue;
+                        }
+                        let batch_start = vertices_index;
+                        for triangle in indices.chunks_exact(3) {
+                            let corners = [triangle[0], triangle[1], triangle[2]].map(|index| {
+                                let (normalized, color) = vertices[index as usize];
+                                let point = (normalized - Vec2::splat(0.5)) * rect_size;
+                                (
+                                    gradient.transform.transform_point2(point),
+                                    (point, Vec4::from_array(color)),
+                                )
+                            });
+                            if corners.iter().any(|(position, (point, _))| {
+                                !position.is_finite() || !point.is_finite()
+                            }) {
+                                continue;
+                            }
+                            let clipped =
+                                clip_polygon(gradient.clip.as_ref(), &corners, |a, b, t| {
+                                    (a.0.lerp(b.0, t), a.1.lerp(b.1, t))
+                                });
+                            if clipped.len() < 3 {
+                                continue;
+                            }
+                            for &(position, (point, color)) in &clipped {
+                                ui_meta.vertices.push(UiGradientVertex {
+                                    position: position.extend(0.).into(),
+                                    uv: (point / rect_size + Vec2::splat(0.5)).into(),
+                                    flags: flags | PROTOTYPE_MESH_FLAG,
+                                    radius: gradient.border_radius.into(),
+                                    border: [
+                                        gradient.border.min_inset.x,
+                                        gradient.border.min_inset.y,
+                                        gradient.border.max_inset.x,
+                                        gradient.border.max_inset.y,
+                                    ],
+                                    size: rect_size.into(),
+                                    point: point.into(),
+                                    g_start: [0.; 2],
+                                    g_dir: [0.; 2],
+                                    start_color: color.to_array(),
+                                    start_len: 0.,
+                                    end_len: 1.,
+                                    end_color: [0.; 4],
+                                    hint: 0.5,
+                                });
+                            }
+                            for i in 1..clipped.len() as u32 - 1 {
+                                ui_meta.indices.push(indices_index);
+                                ui_meta.indices.push(indices_index + i);
+                                ui_meta.indices.push(indices_index + i + 1);
+                                vertices_index += 3;
+                            }
+                            indices_index += clipped.len() as u32;
+                        }
+                        if vertices_index > batch_start {
+                            batches.push((
+                                item.entity(),
+                                GradientBatch {
+                                    range: batch_start..vertices_index,
+                                },
+                            ));
+                        }
+                        continue;
+                    }
+
                     let (g_start, g_dir, g_flags) = match gradient.resolved_gradient {
+                        ResolvedGradient::PrototypeMesh { .. } => unreachable!(),
                         ResolvedGradient::Linear { angle } => {
                             let corner_index = (angle - FRAC_PI_2).rem_euclid(TAU) / FRAC_PI_2;
                             (

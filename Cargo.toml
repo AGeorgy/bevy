@@ -5769,3 +5769,14 @@ name = "GPU Component Array Buffer"
 description = "Shows how to expose per-mesh-instance data to the GPU"
 category = "Shaders"
 wasm = true
+
+[[example]]
+name = "mesh_gradient_renderer_prototype"
+path = "examples/ui/mesh_gradient_renderer_prototype.rs"
+required-features = ["bevy_ui_render"]
+
+[package.metadata.example.mesh_gradient_renderer_prototype]
+name = "Mesh gradient renderer prototype"
+description = "Throwaway certified mesh-gradient tessellation experiment"
+category = "UI"
+wasm = true
