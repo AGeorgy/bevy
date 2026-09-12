@@ -458,7 +458,6 @@ fn spawn_preview(
             min_height: px(260),
             border: UiRect::all(px(24)),
             border_radius: BorderRadius::all(px(34)),
-            overflow: Overflow::clip(),
             ..default()
         },
         BackgroundColor(Color::srgb(0.055, 0.065, 0.09)),

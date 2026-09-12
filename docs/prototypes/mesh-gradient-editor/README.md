@@ -14,6 +14,18 @@ Which interaction design is clearest and most useful as an idiomatic Bevy exampl
 
 The layouts are intentionally structurally different. The selected variant is shareable through the `--variant 0|1|2` argument, and the floating bottom switcher plus Left/Right keys cycle variants without resetting the shared editor state.
 
+### A / Canvas first
+
+![Canvas-first editor](variant-a.png)
+
+### B / Inspector first
+
+![Inspector-first editor](variant-b.png)
+
+### C / Dual preview
+
+![Dual-preview editor](variant-c.png)
+
 ## Shared interaction model
 
 - Clicking a colored point selects it. The selected handle grows and receives a white outline.
@@ -59,5 +71,6 @@ For automated capture and invalid-edit evidence, use `--capture <path> --frames 
 - Layout C computes two synchronized 609x366 logical-pixel previews.
 - The scripted folded edit is rejected with `UncertifiedGeometry`, and the checked model retains the last valid surface.
 - The `wasm32-unknown-unknown` target compiles with Bevy's `ui,webgl2` features.
+- Automated Metal captures confirm that all three layouts render at 2560x1600 physical pixels and keep boundary point handles visible.
 
-The host Mac was locked during the final automated captures, so those images contained no desktop pixels and are not included. Visual layout, pointer behavior, slider behavior, resizing, and the preferred variant remain pending the required live review.
+Hands-on pointer and slider behavior, resizing, and the preferred variant remain pending the required live review.
