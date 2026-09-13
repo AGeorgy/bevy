@@ -11,6 +11,7 @@ pub mod box_shadow;
 pub mod clipping;
 mod gradient;
 mod image;
+mod mesh_gradient;
 pub use image::ImageNodeAssetChangedSystems;
 mod pipeline;
 pub mod render_pass;
