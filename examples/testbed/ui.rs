@@ -55,6 +55,8 @@ fn main() {
     .add_systems(OnEnter(Scene::LayoutRounding), layout_rounding::setup)
     .add_systems(OnEnter(Scene::LinearGradient), linear_gradient::setup)
     .add_systems(OnEnter(Scene::RadialGradient), radial_gradient::setup)
+    .add_systems(OnEnter(Scene::MeshGradient), mesh_gradient::setup)
+    .add_systems(OnExit(Scene::MeshGradient), mesh_gradient::cleanup)
     .add_systems(OnEnter(Scene::Transformations), transformations::setup)
     .add_systems(OnEnter(Scene::ViewportCoords), viewport_coords::setup)
     .add_systems(OnEnter(Scene::ViewportNode), viewport_node::setup)
@@ -72,6 +74,10 @@ fn main() {
     .add_systems(
         Update,
         change_detection::update.run_if(in_state(Scene::ChangeDetection)),
+    )
+    .add_systems(
+        Update,
+        mesh_gradient::update.run_if(in_state(Scene::MeshGradient)),
     )
     .add_systems(Update, switch_scene);
 
@@ -111,6 +117,7 @@ enum Scene {
     LayoutRounding,
     LinearGradient,
     RadialGradient,
+    MeshGradient,
     Transformations,
     #[cfg(feature = "bevy_ui_debug")]
     DebugOutlines,
@@ -143,6 +150,7 @@ impl Scene {
         Scene::LayoutRounding,
         Scene::LinearGradient,
         Scene::RadialGradient,
+        Scene::MeshGradient,
         Scene::Transformations,
         #[cfg(feature = "bevy_ui_debug")]
         Scene::DebugOutlines,
@@ -2343,6 +2351,278 @@ mod radial_gradient {
                     }
                 }
             });
+    }
+}
+
+mod mesh_gradient {
+    use bevy::{
+        math::ops,
+        prelude::*,
+        ui::{MeshGradient, MeshGradientColorSpace, MeshGradientPoint},
+        window::PrimaryWindow,
+    };
+
+    #[derive(Component)]
+    pub(super) struct AnimatedMesh {
+        tick: u32,
+        regular: MeshGradient,
+        replacement: MeshGradient,
+        phase: u32,
+    }
+
+    pub fn setup(mut commands: Commands) {
+        commands.spawn((Camera2d, DespawnOnExit(super::Scene::MeshGradient)));
+
+        let oklab = mesh(3, 3, MeshGradientColorSpace::Oklaba, 0.055, 0.0, 1.0, false);
+        let srgb = mesh(4, 3, MeshGradientColorSpace::Srgba, 0.035, 0.0, 1.0, false);
+        let linear_hdr = mesh(
+            3,
+            3,
+            MeshGradientColorSpace::LinearRgba,
+            0.045,
+            0.08,
+            0.84,
+            true,
+        );
+        let full_capacity = mesh(16, 16, MeshGradientColorSpace::Oklaba, 0.0, 0.0, 1.0, false);
+
+        commands
+            .spawn((
+                Node {
+                    width: percent(100),
+                    height: percent(100),
+                    display: Display::Grid,
+                    grid_template_columns: vec![RepeatedGridTrack::fr(3, 1.0)],
+                    grid_template_rows: vec![RepeatedGridTrack::fr(2, 1.0)],
+                    padding: UiRect::all(px(30)),
+                    row_gap: px(24),
+                    column_gap: px(24),
+                    ..default()
+                },
+                BackgroundColor(Color::srgb(0.025, 0.03, 0.045)),
+                DespawnOnExit(super::Scene::MeshGradient),
+            ))
+            .with_children(|parent| {
+                card(parent, "OKLab · rounded", oklab.clone());
+
+                parent
+                    .spawn((
+                        Node {
+                            overflow: Overflow::clip(),
+                            border_radius: BorderRadius::all(px(26)),
+                            ..card_node()
+                        },
+                        BackgroundColor(Color::srgb(0.08, 0.09, 0.12)),
+                    ))
+                    .with_children(|parent| {
+                        parent.spawn((
+                            Node {
+                                position_type: PositionType::Absolute,
+                                left: percent(-8),
+                                top: percent(-10),
+                                width: percent(116),
+                                height: percent(120),
+                                ..default()
+                            },
+                            BackgroundGradient::from(srgb.clone()),
+                            UiTransform::from_rotation(Rot2::degrees(-7.0)),
+                        ));
+                        label(parent, "sRGB · transform + ancestor clip");
+                    });
+
+                parent
+                    .spawn((
+                        card_node(),
+                        BackgroundColor(Color::srgb(0.06, 0.07, 0.1)),
+                        BackgroundGradient(vec![
+                            linear_hdr.clone().into(),
+                            RadialGradient {
+                                position: UiPosition::CENTER,
+                                shape: RadialGradientShape::Circle(percent(70)),
+                                stops: vec![
+                                    ColorStop::auto(Color::srgba(1.0, 1.0, 1.0, 0.32)),
+                                    ColorStop::auto(Color::NONE),
+                                ],
+                                ..default()
+                            }
+                            .into(),
+                        ]),
+                    ))
+                    .with_children(|parent| label(parent, "Linear RGB · HDR + alpha + stack"));
+
+                parent
+                    .spawn((
+                        Node {
+                            border: UiRect {
+                                left: px(18),
+                                right: px(7),
+                                top: px(11),
+                                bottom: px(24),
+                            },
+                            border_radius: BorderRadius {
+                                top_left: px(34).into(),
+                                top_right: px(8).into(),
+                                bottom_left: px(16).into(),
+                                bottom_right: px(42).into(),
+                            },
+                            ..card_node()
+                        },
+                        BackgroundGradient::from(oklab.clone()),
+                        BorderGradient::from(srgb.clone()),
+                    ))
+                    .with_children(|parent| label(parent, "Background + asymmetric mesh border"));
+
+                parent
+                    .spawn((card_node(), BackgroundGradient::from(full_capacity)))
+                    .with_children(|parent| label(parent, "16 × 16 · WebGL2 capacity"));
+
+                let replacement = mesh(4, 4, MeshGradientColorSpace::Oklaba, 0.02, 0.0, 1.0, false);
+                parent
+                    .spawn((
+                        card_node(),
+                        BackgroundGradient::from(oklab.clone()),
+                        AnimatedMesh {
+                            tick: 0,
+                            regular: oklab,
+                            replacement,
+                            phase: u32::MAX,
+                        },
+                    ))
+                    .with_children(|parent| {
+                        label(parent, "Live edit · resize · grid replace · scale factor");
+                    });
+            });
+    }
+
+    pub fn update(
+        mut animated: Query<(&mut Node, &mut BackgroundGradient, &mut AnimatedMesh)>,
+        mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    ) {
+        let Ok((mut node, mut background, mut animation)) = animated.single_mut() else {
+            return;
+        };
+        let elapsed = animation.tick;
+        let phase = (elapsed / 25) % 4;
+
+        if phase == 0 {
+            let mut mesh = animation.regular.clone();
+            let wave = ops::sin(elapsed as f32 * 0.12) * 0.025;
+            mesh.try_set_position(4, Vec2::new(0.5 + wave, 0.5 - wave))
+                .unwrap();
+            background.0[0] = mesh.into();
+        } else if phase != animation.phase {
+            match phase {
+                1 => {
+                    node.width = percent(78);
+                    background.0[0] = animation.regular.clone().into();
+                }
+                2 => {
+                    node.width = percent(100);
+                    background.0[0] = animation.replacement.clone().into();
+                }
+                3 => {
+                    let mut rejected = animation.regular.clone();
+                    let before = rejected.clone();
+                    assert!(rejected.try_set_position(0, Vec2::splat(f32::NAN)).is_err());
+                    assert_eq!(rejected, before);
+                    background.0[0] = rejected.into();
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        if phase != animation.phase {
+            if let Ok(mut window) = windows.single_mut() {
+                window
+                    .resolution
+                    .set_scale_factor_override(Some(if phase == 2 { 2.0 } else { 1.0 }));
+            }
+            animation.phase = phase;
+        }
+        animation.tick = animation.tick.wrapping_add(1);
+    }
+
+    pub fn cleanup(mut windows: Query<&mut Window, With<PrimaryWindow>>) {
+        if let Ok(mut window) = windows.single_mut() {
+            window.resolution.set_scale_factor_override(None);
+        }
+    }
+
+    fn card(parent: &mut ChildSpawnerCommands, text: &'static str, mesh: MeshGradient) {
+        parent
+            .spawn((card_node(), BackgroundGradient::from(mesh)))
+            .with_children(|parent| label(parent, text));
+    }
+
+    fn card_node() -> Node {
+        Node {
+            width: percent(100),
+            height: percent(100),
+            border_radius: BorderRadius::all(px(26)),
+            overflow: Overflow::clip(),
+            ..default()
+        }
+    }
+
+    fn label(parent: &mut ChildSpawnerCommands, text: &'static str) {
+        parent.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(12),
+                bottom: px(10),
+                padding: UiRect::axes(px(8), px(4)),
+                border_radius: BorderRadius::all(px(7)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.68)),
+            Text::new(text),
+            TextColor(Color::WHITE),
+            TextFont::from_font_size(13.0),
+        ));
+    }
+
+    fn mesh(
+        width: usize,
+        height: usize,
+        color_space: MeshGradientColorSpace,
+        deformation: f32,
+        margin: f32,
+        extent: f32,
+        hdr: bool,
+    ) -> MeshGradient {
+        let points = (0..height)
+            .flat_map(|row| {
+                (0..width).map(move |column| {
+                    let x = column as f32 / (width - 1) as f32;
+                    let y = row as f32 / (height - 1) as f32;
+                    let interior_x = column > 0 && column + 1 < width;
+                    let interior_y = row > 0 && row + 1 < height;
+                    let offset_x = if interior_x {
+                        deformation * ops::sin(y * core::f32::consts::TAU)
+                    } else {
+                        0.0
+                    };
+                    let offset_y = if interior_y {
+                        deformation * ops::sin(x * core::f32::consts::TAU)
+                    } else {
+                        0.0
+                    };
+                    let position = Vec2::new(
+                        margin + extent * x + offset_x,
+                        margin + extent * y + offset_y,
+                    );
+                    let alpha = 0.3 + 0.7 * (1.0 - x * y);
+                    let color = if hdr {
+                        Color::linear_rgba(2.4 * x, 1.8 * y, 1.2 - 1.7 * x * y, alpha)
+                    } else {
+                        Color::srgba(0.12 + 0.88 * x, 0.1 + 0.82 * y, 0.95 - 0.62 * x * y, alpha)
+                    };
+                    MeshGradientPoint::new(position, color)
+                })
+            })
+            .collect();
+
+        MeshGradient::new_in_color_space(width, height, points, color_space).unwrap()
     }
 }
 
