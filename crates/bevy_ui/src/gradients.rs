@@ -478,6 +478,9 @@ pub enum Gradient {
     ///
     /// <https://developer.mozilla.org/en-US/docs/Web/CSS/gradient/conic-gradient>
     Conic(ConicGradient),
+    /// A smooth two-dimensional gradient controlled by a checked grid of
+    /// colored points.
+    Mesh(MeshGradient),
 }
 
 impl Gradient {
@@ -487,6 +490,7 @@ impl Gradient {
             Gradient::Linear(gradient) => gradient.stops.is_empty(),
             Gradient::Radial(gradient) => gradient.stops.is_empty(),
             Gradient::Conic(gradient) => gradient.stops.is_empty(),
+            Gradient::Mesh(_) => false,
         }
     }
 
@@ -505,6 +509,7 @@ impl Gradient {
                 .stops
                 .first()
                 .and_then(|stop| (gradient.stops.len() == 1).then_some(stop.color)),
+            Gradient::Mesh(_) => None,
         }
     }
 
@@ -514,6 +519,7 @@ impl Gradient {
             Gradient::Linear(linear_gradient) => linear_gradient.color_space,
             Gradient::Radial(radial_gradient) => radial_gradient.color_space,
             Gradient::Conic(conic_gradient) => conic_gradient.color_space,
+            Gradient::Mesh(mesh_gradient) => mesh_gradient.color_space().into(),
         }
     }
 }
@@ -533,6 +539,12 @@ impl From<RadialGradient> for Gradient {
 impl From<ConicGradient> for Gradient {
     fn from(value: ConicGradient) -> Self {
         Self::Conic(value)
+    }
+}
+
+impl From<MeshGradient> for Gradient {
+    fn from(value: MeshGradient) -> Self {
+        Self::Mesh(value)
     }
 }
 

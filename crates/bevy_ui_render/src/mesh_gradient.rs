@@ -5,16 +5,11 @@
 //! Color is evaluated in the fragment shader, so its error is bounded through
 //! the inverse surface's Lipschitz constant rather than vertex-color error.
 
-// Consumed by the GPU integration in the following implementation step.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Prepared for mesh-gradient GPU integration.")
-)]
-
 use bevy_color::{ColorToComponents, LinearRgba, Oklaba, Srgba};
 use bevy_math::{DVec2, Mat2, Vec2};
 use bevy_platform::{collections::HashMap, sync::Arc};
 use bevy_ui::{MeshGradient, MeshGradientColorSpace};
+use bytemuck::{Pod, Zeroable};
 
 const GEOMETRY_LIMIT: f64 = 0.25;
 const COLOR_LIMIT: f64 = 1.0 / 255.0;
@@ -90,19 +85,20 @@ type IntervalPatch = [IntervalPoint; 16];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct TopologyKey {
-    width: usize,
-    height: usize,
-    subdivisions: usize,
+    pub width: usize,
+    pub height: usize,
+    pub subdivisions: usize,
 }
 
 impl TopologyKey {
-    fn triangles(self) -> usize {
+    pub fn triangles(self) -> usize {
         2 * (self.width - 1) * (self.height - 1) * self.subdivisions.pow(2)
     }
 }
 
 /// Patch-local UVs stay dyadic, making adjacent patch edges exactly identical.
-#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub(crate) struct ParameterVertex {
     pub patch: [u32; 2],
     pub uv: [f32; 2],
@@ -648,6 +644,172 @@ mod tests {
 
     fn axes(size: f64) -> [DVec2; 2] {
         [DVec2::X * size, DVec2::Y * size]
+    }
+
+    type ShaderPoint = [f32; 6];
+
+    fn shader_values(mesh: &MeshGradient) -> Vec<ShaderPoint> {
+        mesh.points()
+            .iter()
+            .map(|point| {
+                let color = match mesh.color_space() {
+                    MeshGradientColorSpace::LinearRgba => {
+                        LinearRgba::from(point.color).to_f32_array()
+                    }
+                    MeshGradientColorSpace::Srgba => Srgba::from(point.color).to_f32_array(),
+                    MeshGradientColorSpace::Oklaba => Oklaba::from(point.color).to_f32_array(),
+                };
+                [
+                    point.position.x,
+                    point.position.y,
+                    color[0],
+                    color[1],
+                    color[2],
+                    color[3],
+                ]
+            })
+            .collect()
+    }
+
+    fn shader_control(
+        values: &[ShaderPoint],
+        width: usize,
+        height: usize,
+        x: isize,
+        y: isize,
+    ) -> ShaderPoint {
+        fn row(values: &[ShaderPoint], width: usize, x: isize, y: usize) -> ShaderPoint {
+            let at = |x| values[y * width + x];
+            if x < 0 {
+                core::array::from_fn(|channel| 2.0 * at(0)[channel] - at(1)[channel])
+            } else if x >= width as isize {
+                core::array::from_fn(|channel| {
+                    2.0 * at(width - 1)[channel] - at(width - 2)[channel]
+                })
+            } else {
+                at(x as usize)
+            }
+        }
+        if y < 0 {
+            let a = row(values, width, x, 0);
+            let b = row(values, width, x, 1);
+            core::array::from_fn(|channel| 2.0 * a[channel] - b[channel])
+        } else if y >= height as isize {
+            let a = row(values, width, x, height - 1);
+            let b = row(values, width, x, height - 2);
+            core::array::from_fn(|channel| 2.0 * a[channel] - b[channel])
+        } else {
+            row(values, width, x, y as usize)
+        }
+    }
+
+    fn shader_cubic(
+        p0: ShaderPoint,
+        p1: ShaderPoint,
+        p2: ShaderPoint,
+        p3: ShaderPoint,
+        t: f32,
+    ) -> ShaderPoint {
+        if t == 0.0 {
+            return p1;
+        }
+        if t == 1.0 {
+            return p2;
+        }
+        core::array::from_fn(|channel| {
+            0.5 * (2.0 * p1[channel]
+                + (-p0[channel] + p2[channel]) * t
+                + (2.0 * p0[channel] - 5.0 * p1[channel] + 4.0 * p2[channel] - p3[channel]) * t * t
+                + (-p0[channel] + 3.0 * p1[channel] - 3.0 * p2[channel] + p3[channel]) * t * t * t)
+        })
+    }
+
+    fn shader_surface(mesh: &MeshGradient, column: usize, row: usize, uv: Vec2) -> ShaderPoint {
+        let values = shader_values(mesh);
+        let rows: [ShaderPoint; 4] = core::array::from_fn(|y| {
+            shader_cubic(
+                shader_control(
+                    &values,
+                    mesh.width(),
+                    mesh.height(),
+                    column as isize - 1,
+                    row as isize + y as isize - 1,
+                ),
+                shader_control(
+                    &values,
+                    mesh.width(),
+                    mesh.height(),
+                    column as isize,
+                    row as isize + y as isize - 1,
+                ),
+                shader_control(
+                    &values,
+                    mesh.width(),
+                    mesh.height(),
+                    column as isize + 1,
+                    row as isize + y as isize - 1,
+                ),
+                shader_control(
+                    &values,
+                    mesh.width(),
+                    mesh.height(),
+                    column as isize + 2,
+                    row as isize + y as isize - 1,
+                ),
+                uv.x,
+            )
+        });
+        shader_cubic(rows[0], rows[1], rows[2], rows[3], uv.y)
+    }
+
+    #[test]
+    fn shader_f32_surface_agrees_with_cpu_reference_and_shares_exact_edges() {
+        for space in [
+            MeshGradientColorSpace::LinearRgba,
+            MeshGradientColorSpace::Srgba,
+            MeshGradientColorSpace::Oklaba,
+        ] {
+            for size in [2, 3, 16] {
+                let grid = mesh(size, 0.02 / (size - 1) as f32, 4.0, space);
+                let reference = patches(&grid);
+                for row in 0..size - 1 {
+                    for column in 0..size - 1 {
+                        let patch = &reference[row * (size - 1) + column];
+                        for uv in [
+                            Vec2::ZERO,
+                            Vec2::new(0.125, 0.75),
+                            Vec2::new(0.5, 0.5),
+                            Vec2::new(0.875, 0.25),
+                            Vec2::ONE,
+                        ] {
+                            let gpu = shader_surface(&grid, column, row, uv);
+                            let cpu = evaluate(patch, uv.as_dvec2());
+                            for channel in 0..6 {
+                                let tolerance = 2e-5 * (1.0 + cpu[channel].abs());
+                                assert!(
+                                    (f64::from(gpu[channel]) - cpu[channel]).abs() <= tolerance,
+                                    "{space:?} {size}x{size} patch ({column},{row}) {uv:?} channel {channel}: gpu={} cpu={}",
+                                    gpu[channel],
+                                    cpu[channel],
+                                );
+                            }
+                        }
+                        if column + 1 < size - 1 {
+                            let left = shader_surface(&grid, column, row, Vec2::new(1.0, 0.375));
+                            let right =
+                                shader_surface(&grid, column + 1, row, Vec2::new(0.0, 0.375));
+                            assert_eq!(left.map(f32::to_bits), right.map(f32::to_bits));
+                        }
+                        if row + 1 < size - 1 {
+                            let top = shader_surface(&grid, column, row, Vec2::new(0.625, 1.0));
+                            let bottom =
+                                shader_surface(&grid, column, row + 1, Vec2::new(0.625, 0.0));
+                            assert_eq!(top.map(f32::to_bits), bottom.map(f32::to_bits));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
