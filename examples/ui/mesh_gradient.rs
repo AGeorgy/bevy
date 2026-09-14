@@ -6,18 +6,27 @@
 
 use bevy::{
     color::ColorToComponents,
+    diagnostic::{DiagnosticPath, DiagnosticsStore},
     math::ops,
     picking::hover::Hovered,
+    platform::time::Instant,
     prelude::*,
+    render::diagnostic::RenderDiagnosticsPlugin,
     ui::{MeshGradient, MeshGradientError, MeshGradientPoint, Pressed},
     ui_widgets::{Activate, Button, Slider, SliderRange, SliderThumb, SliderValue, ValueChange},
-    window::PrimaryWindow,
+    window::{PresentMode, PrimaryWindow},
 };
 
 const PANEL: Color = Color::srgb(0.075, 0.09, 0.125);
 const TEXT: Color = Color::srgb(0.88, 0.91, 0.96);
 const MUTED: Color = Color::srgb(0.56, 0.63, 0.73);
 const ACCENT: Color = Color::srgb(0.25, 0.72, 0.92);
+#[cfg(not(target_arch = "wasm32"))]
+const BENCHMARK_ENV: &str = "BEVY_MESH_GRADIENT_BENCHMARK";
+const BENCHMARK_WARMUP_FRAMES: usize = 300;
+const BENCHMARK_SAMPLE_FRAMES: usize = 1_000;
+const UI_CPU_TIME: DiagnosticPath = DiagnosticPath::const_new("render/ui/elapsed_cpu");
+const UI_GPU_TIME: DiagnosticPath = DiagnosticPath::const_new("render/ui/elapsed_gpu");
 
 #[derive(Resource)]
 struct EditorState {
@@ -30,6 +39,16 @@ struct EditorState {
     show_border: bool,
     rebuild: bool,
     status: String,
+}
+
+#[derive(Resource, Default)]
+struct BenchmarkSamples {
+    frame: usize,
+    last_update_cpu_ms: f64,
+    total_ms: Vec<f64>,
+    update_cpu_ms: Vec<f64>,
+    ui_cpu_ms: Vec<f64>,
+    ui_gpu_ms: Vec<f64>,
 }
 
 impl EditorState {
@@ -133,16 +152,30 @@ enum EditorAction {
 }
 
 fn main() {
-    App::new()
-        .insert_resource(ClearColor(Color::srgb(0.025, 0.033, 0.05)))
-        .insert_resource(EditorState::new())
+    #[cfg(not(target_arch = "wasm32"))]
+    let benchmark = std::env::var_os(BENCHMARK_ENV).is_some();
+    #[cfg(target_arch = "wasm32")]
+    let benchmark = false;
+    let mut state = EditorState::new();
+    state.animate = benchmark;
+    if benchmark {
+        state.status = "Benchmark animation enabled".into();
+    }
+    let mut window = Window {
+        title: "Mesh Gradient".into(),
+        resolution: (1280, 800).into(),
+        fit_canvas_to_parent: true,
+        ..default()
+    };
+    if benchmark {
+        window.present_mode = PresentMode::AutoNoVsync;
+    }
+
+    let mut app = App::new();
+    app.insert_resource(ClearColor(Color::srgb(0.025, 0.033, 0.05)))
+        .insert_resource(state)
         .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "Mesh Gradient".into(),
-                resolution: (1280, 800).into(),
-                fit_canvas_to_parent: true,
-                ..default()
-            }),
+            primary_window: Some(window),
             ..default()
         }))
         .add_observer(handle_action)
@@ -161,8 +194,13 @@ fn main() {
                 style_buttons,
             )
                 .chain(),
-        )
-        .run();
+        );
+    if benchmark {
+        app.add_plugins(RenderDiagnosticsPlugin)
+            .init_resource::<BenchmarkSamples>()
+            .add_systems(Last, collect_benchmark);
+    }
+    app.run();
 }
 
 fn preset(size: usize) -> Vec<MeshGradientPoint> {
@@ -712,10 +750,15 @@ fn keyboard(keys: Res<ButtonInput<KeyCode>>, mut state: ResMut<EditorState>) {
     }
 }
 
-fn animate(time: Res<Time>, mut state: ResMut<EditorState>) {
+fn animate(
+    time: Res<Time>,
+    mut state: ResMut<EditorState>,
+    mut benchmark: Option<ResMut<BenchmarkSamples>>,
+) {
     if !state.animate {
         return;
     }
+    let started = benchmark.as_ref().map(|_| Instant::now());
     state.elapsed += time.delta_secs();
     let mut candidate = state.rest.clone();
     let (width, height) = state.mesh.dimensions();
@@ -729,6 +772,72 @@ fn animate(time: Res<Time>, mut state: ResMut<EditorState>) {
     if let Err(error) = state.mesh.try_replace_points(candidate) {
         state.reject("animation frame", error);
     }
+    if let (Some(started), Some(benchmark)) = (started, benchmark.as_deref_mut()) {
+        benchmark.last_update_cpu_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    }
+}
+
+fn collect_benchmark(
+    time: Res<Time<Real>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    diagnostics: Res<DiagnosticsStore>,
+    mut samples: ResMut<BenchmarkSamples>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    samples.frame += 1;
+    if samples.frame <= BENCHMARK_WARMUP_FRAMES {
+        return;
+    }
+    samples.total_ms.push(time.delta_secs_f64() * 1_000.0);
+    let update_cpu_ms = samples.last_update_cpu_ms;
+    samples.update_cpu_ms.push(update_cpu_ms);
+    if let Some(value) = diagnostics
+        .get(&UI_CPU_TIME)
+        .and_then(|diagnostic| diagnostic.measurement())
+        .map(|measurement| measurement.value)
+    {
+        samples.ui_cpu_ms.push(value);
+    }
+    if let Some(value) = diagnostics
+        .get(&UI_GPU_TIME)
+        .and_then(|diagnostic| diagnostic.measurement())
+        .map(|measurement| measurement.value)
+    {
+        samples.ui_gpu_ms.push(value);
+    }
+    if samples.total_ms.len() < BENCHMARK_SAMPLE_FRAMES {
+        return;
+    }
+
+    let (total_median, total_p95) = median_and_p95(&mut samples.total_ms);
+    let (update_median, update_p95) = median_and_p95(&mut samples.update_cpu_ms);
+    let (ui_cpu_median, ui_cpu_p95) = median_and_p95(&mut samples.ui_cpu_ms);
+    let gpu = if samples.ui_gpu_ms.is_empty() {
+        "unavailable on this backend".to_string()
+    } else {
+        let (median, p95) = median_and_p95(&mut samples.ui_gpu_ms);
+        format!("median={median:.3}ms p95={p95:.3}ms")
+    };
+    let window = windows.single().ok();
+    println!(
+        "mesh-gradient editor benchmark: frames={} physical={}x{} scale={:.2} total median={total_median:.3}ms p95={total_p95:.3}ms update CPU median={update_median:.3}ms p95={update_p95:.3}ms UI pass CPU median={ui_cpu_median:.3}ms p95={ui_cpu_p95:.3}ms UI pass GPU {gpu}",
+        samples.total_ms.len(),
+        window.map_or(0, Window::physical_width),
+        window.map_or(0, Window::physical_height),
+        window.map_or(0.0, Window::scale_factor),
+    );
+    exit.write(AppExit::Success);
+}
+
+fn median_and_p95(samples: &mut [f64]) -> (f64, f64) {
+    if samples.is_empty() {
+        return (f64::NAN, f64::NAN);
+    }
+    samples.sort_unstable_by(f64::total_cmp);
+    (
+        samples[samples.len() / 2],
+        samples[samples.len() * 95 / 100],
+    )
 }
 
 fn responsive_layout(
@@ -806,20 +915,24 @@ fn sync_editor(
     for (kind, mut background, mut border) in &mut previews {
         match kind {
             PreviewKind::Background => {
-                background.0 = state
-                    .show_background
-                    .then(|| current.clone())
-                    .into_iter()
-                    .collect();
-                border.0.clear();
+                background.set_if_neq(BackgroundGradient(
+                    state
+                        .show_background
+                        .then(|| current.clone())
+                        .into_iter()
+                        .collect(),
+                ));
+                border.set_if_neq(BorderGradient::default());
             }
             PreviewKind::Border => {
-                background.0.clear();
-                border.0 = state
-                    .show_border
-                    .then(|| current.clone())
-                    .into_iter()
-                    .collect();
+                background.set_if_neq(BackgroundGradient::default());
+                border.set_if_neq(BorderGradient(
+                    state
+                        .show_border
+                        .then(|| current.clone())
+                        .into_iter()
+                        .collect(),
+                ));
             }
         }
     }

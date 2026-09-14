@@ -10,6 +10,7 @@ use bevy_math::{DVec2, Mat2, Vec2};
 use bevy_platform::{collections::HashMap, sync::Arc};
 use bevy_ui::{MeshGradient, MeshGradientColorSpace};
 use bytemuck::{Pod, Zeroable};
+use smallvec::SmallVec;
 
 const GEOMETRY_LIMIT: f64 = 0.25;
 const COLOR_LIMIT: f64 = 1.0 / 255.0;
@@ -542,9 +543,9 @@ fn output_lipschitz(patch: &IntervalPatch, space: MeshGradientColorSpace) -> f64
     }
 }
 
-fn interval_patches(mesh: &MeshGradient) -> Vec<IntervalPatch> {
+fn interval_patches(mesh: &MeshGradient) -> SmallVec<[IntervalPatch; 9]> {
     let (width, height) = mesh.dimensions();
-    let values: Vec<Point> = mesh
+    let values: SmallVec<[Point; 16]> = mesh
         .points()
         .iter()
         .map(|point| {
@@ -563,13 +564,31 @@ fn interval_patches(mesh: &MeshGradient) -> Vec<IntervalPatch> {
             ]
         })
         .collect();
-    fn indices(index: isize, len: usize) -> [(usize, f64); 2] {
-        if index < 0 {
-            [(0, 2.0), (1, -1.0)]
-        } else if index >= len as isize {
-            [(len - 1, 2.0), (len - 2, -1.0)]
+    fn sample(values: &[Point], width: usize, height: usize, x: isize, y: isize) -> IntervalPoint {
+        let row = |y: usize| {
+            let exact = |x: usize| values[y * width + x].map(Interval::exact);
+            if x < 0 {
+                core::array::from_fn(|channel| exact(0)[channel].scale(2.0).sub(exact(1)[channel]))
+            } else if x >= width as isize {
+                core::array::from_fn(|channel| {
+                    exact(width - 1)[channel]
+                        .scale(2.0)
+                        .sub(exact(width - 2)[channel])
+                })
+            } else {
+                exact(x as usize)
+            }
+        };
+        if y < 0 {
+            let first = row(0);
+            let second = row(1);
+            core::array::from_fn(|channel| first[channel].scale(2.0).sub(second[channel]))
+        } else if y >= height as isize {
+            let last = row(height - 1);
+            let previous = row(height - 2);
+            core::array::from_fn(|channel| last[channel].scale(2.0).sub(previous[channel]))
         } else {
-            [(index as usize, 1.0), (index as usize, 0.0)]
+            row(y as usize)
         }
     }
     fn bezier(p: [IntervalPoint; 4]) -> [IntervalPoint; 4] {
@@ -580,22 +599,18 @@ fn interval_patches(mesh: &MeshGradient) -> Vec<IntervalPatch> {
             p[2],
         ]
     }
-    let mut result = Vec::new();
+    let mut result = SmallVec::with_capacity((width - 1) * (height - 1));
     for row in 0..height - 1 {
         for column in 0..width - 1 {
             let rows: [[IntervalPoint; 4]; 4] = core::array::from_fn(|y| {
                 bezier(core::array::from_fn(|x| {
-                    let mut point = [Interval::exact(0.0); 6];
-                    for (iy, wy) in indices(row as isize + y as isize - 1, height) {
-                        for (ix, wx) in indices(column as isize + x as isize - 1, width) {
-                            for i in 0..6 {
-                                point[i] = point[i].add(
-                                    Interval::exact(values[iy * width + ix][i]).scale(wx * wy),
-                                );
-                            }
-                        }
-                    }
-                    point
+                    sample(
+                        &values,
+                        width,
+                        height,
+                        column as isize + x as isize - 1,
+                        row as isize + y as isize - 1,
+                    )
                 }))
             });
             let columns: [[IntervalPoint; 4]; 4] =
@@ -610,7 +625,7 @@ fn interval_patches(mesh: &MeshGradient) -> Vec<IntervalPatch> {
 mod tests {
     use super::*;
     use bevy_color::Color;
-    use bevy_math::Vec2;
+    use bevy_math::{ops, Vec2};
     use bevy_ui::MeshGradientPoint;
 
     fn patches(mesh: &MeshGradient) -> Vec<Patch> {
@@ -1158,5 +1173,123 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    #[ignore = "manual release-mode performance and quality-characteristic gate"]
+    #[expect(clippy::print_stderr, reason = "Allowed in a manual performance test.")]
+    fn animated_workload_performance_and_tiers() {
+        use std::{hint::black_box, time::Instant};
+
+        let mut gradients: Vec<_> = (0..64).map(stress_mesh).collect();
+        let mut quality: Vec<_> = (0..64).map(|_| QualityState::default()).collect();
+        let mut samples = Vec::with_capacity(1_000);
+        let mut tiers = [0usize; MAX_SUBDIVISIONS + 1];
+        let mut triangles = 0;
+
+        for frame in 0..1_100 {
+            let started = Instant::now();
+            tiers.fill(0);
+            triangles = 0;
+            for (index, (mesh, state)) in gradients.iter_mut().zip(&mut quality).enumerate() {
+                let phase = frame as f32 * 0.03 + index as f32 * 0.07;
+                mesh.try_edit_points(|points| {
+                    for row in 1..3 {
+                        for column in 1..3 {
+                            let point = &mut points[row * 4 + column];
+                            let offset = phase + row as f32 * 0.8 + column as f32 * 0.6;
+                            point.position = Vec2::new(
+                                column as f32 / 3.0 + ops::sin(offset) * 0.022,
+                                row as f32 / 3.0 + ops::sin(offset * 0.83) * 0.018,
+                            );
+                        }
+                    }
+                    Ok(())
+                })
+                .unwrap();
+                let selection = state.update(&SurfaceBounds::new(mesh), axes(256.0));
+                tiers[selection.key.subdivisions] += 1;
+                triangles += selection.key.triangles();
+                black_box(selection);
+            }
+            if frame >= 100 {
+                samples.push(started.elapsed());
+            }
+        }
+
+        samples.sort_unstable();
+        let median = samples[samples.len() / 2];
+        let p95 = samples[samples.len() * 95 / 100];
+        let editor = editor_mesh();
+        let editor_selection = QualityState::default().update(
+            &SurfaceBounds::new(&editor),
+            [DVec2::X * 1_120.0, DVec2::Y * 956.0],
+        );
+        let full_capacity = QualityState::default().update(
+            &SurfaceBounds::new(&mesh(16, 0.0, 1.0, MeshGradientColorSpace::LinearRgba)),
+            axes(256.0),
+        );
+        let tier_counts: Vec<_> = tiers
+            .iter()
+            .enumerate()
+            .filter_map(|(tier, count)| (*count > 0).then_some((tier, *count)))
+            .collect();
+        eprintln!(
+            "mesh-gradient workload: CPU median={median:?} p95={p95:?}; stress tiers={tier_counts:?} triangles={triangles}; editor tier={} triangles={}; 16x16 tier={} triangles={}",
+            editor_selection.key.subdivisions,
+            editor_selection.key.triangles(),
+            full_capacity.key.subdivisions,
+            full_capacity.key.triangles(),
+        );
+        assert!(p95 <= core::time::Duration::from_millis(4));
+        assert!(!editor_selection.capped);
+        assert!(!full_capacity.capped);
+    }
+
+    fn stress_mesh(index: usize) -> MeshGradient {
+        let points = (0..16)
+            .map(|point| {
+                let column = point % 4;
+                let row = point / 4;
+                let x = column as f32 / 3.0;
+                let y = row as f32 / 3.0;
+                let phase = index as f32 * 0.13;
+                MeshGradientPoint::new(
+                    Vec2::new(x, y),
+                    Color::oklaba(
+                        0.62 + 0.18 * x - 0.06 * y,
+                        0.14 * ops::sin(phase + x * 2.1) - 0.08 * y,
+                        0.14 * ops::sin(phase * 0.7 + y * 2.3) - 0.08 * x,
+                        0.72 + 0.28 * (1.0 - x * y),
+                    ),
+                )
+            })
+            .collect();
+        MeshGradient::new(4, 4, points).unwrap()
+    }
+
+    fn editor_mesh() -> MeshGradient {
+        let points = (0..9)
+            .map(|index| {
+                let column = index % 3;
+                let row = index / 3;
+                let x = column as f32 / 2.0;
+                let y = row as f32 / 2.0;
+                let mut position = Vec2::new(x, y);
+                if column == 1 && row == 1 {
+                    position += Vec2::new(0.045, -0.03);
+                }
+                MeshGradientPoint::new(
+                    position,
+                    Color::oklaba(
+                        0.68 + 0.12 * x - 0.08 * y,
+                        0.15 - 0.27 * x + 0.04 * y,
+                        0.13 + 0.04 * x - 0.25 * y,
+                        1.0 - 0.22 * x * y,
+                    ),
+                )
+            })
+            .collect();
+        MeshGradient::new(3, 3, points).unwrap()
     }
 }
