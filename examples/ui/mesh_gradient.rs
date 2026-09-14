@@ -507,6 +507,8 @@ fn spawn_inspector(parent: &mut ChildSpawnerCommands, state: &EditorState) {
     parent.spawn((
         Node {
             min_width: px(265),
+            flex_basis: px(265),
+            flex_shrink: 0.0,
             flex_direction: FlexDirection::Column,
             row_gap: px(7),
             ..default()
@@ -538,6 +540,7 @@ fn spawn_inspector(parent: &mut ChildSpawnerCommands, state: &EditorState) {
     parent.spawn((
         Node {
             min_width: px(370),
+            flex_basis: px(370),
             flex_grow: 1.0,
             flex_direction: FlexDirection::Column,
             row_gap: px(7),
@@ -587,6 +590,7 @@ fn spawn_inspector(parent: &mut ChildSpawnerCommands, state: &EditorState) {
     parent.spawn((
         Node {
             min_width: px(300),
+            flex_basis: px(300),
             flex_grow: 1.0,
             flex_direction: FlexDirection::Column,
             row_gap: px(7),
@@ -603,6 +607,11 @@ fn spawn_inspector(parent: &mut ChildSpawnerCommands, state: &EditorState) {
             ),
             (
                 StateReadout,
+                Node {
+                    height: px(60),
+                    overflow: Overflow::clip(),
+                    ..default()
+                },
                 Text::new(""),
                 TextFont::from_font_size(12.0),
                 TextColor(TEXT),
