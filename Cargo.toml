@@ -4174,6 +4174,17 @@ category = "UI (User Interface)"
 wasm = true
 
 [[example]]
+name = "mesh_gradient"
+path = "examples/ui/mesh_gradient.rs"
+doc-scrape-examples = true
+
+[package.metadata.example.mesh_gradient]
+name = "Mesh Gradient"
+description = "Edit a checked mesh gradient as synchronized UI background and border previews"
+category = "UI (User Interface)"
+wasm = true
+
+[[example]]
 name = "stacked_gradients"
 path = "examples/ui/styling/stacked_gradients.rs"
 doc-scrape-examples = true

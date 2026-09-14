@@ -192,6 +192,10 @@ pub enum MeshGradientError {
 /// continuous-surface invariants. Its fields are private, reflection is opaque,
 /// and deserialization re-enters the checked constructor. Use the checked edit
 /// methods for animation; a rejected edit leaves the previous gradient intact.
+/// Grids contain between 2 and 16 columns and rows, inclusive, and points are
+/// supplied in row-major order. Positions are relative to the UI node: `(0, 0)`
+/// is its top-left and `(1, 1)` is its bottom-right. The surface may cover only
+/// part of the node, and any uncovered area remains transparent.
 ///
 /// Geometry is a tensor-product Catmull-Rom surface represented as bicubic
 /// Bézier patches. Boundary points are inferred by linear extrapolation. The
@@ -203,6 +207,15 @@ pub enum MeshGradientError {
 /// RGB coordinates may be HDR and cubic interpolation may overshoot the input
 /// colors. Derived alpha is clamped by the renderer. Input alpha must be in
 /// `[0, 1]`, and all input and derived control values must remain finite.
+/// Colors interpolate in `OKLab` by default; `sRGB` and linear RGB are also
+/// available through [`MeshGradientColorSpace`]. Alpha always interpolates
+/// separately from the color coordinates.
+///
+/// The renderer chooses an adaptive tessellation level from the surface's
+/// curvature, color variation, transform, and physical on-screen size. Authors
+/// do not select a subdivision count. If the automatic quality requirement
+/// exceeds the renderer's bounded triangle budget, Bevy renders the finest
+/// supported tier and emits a rate-limited diagnostic.
 #[derive(Clone, Debug, PartialEq, Reflect)]
 #[reflect(opaque)]
 #[reflect(Clone, PartialEq, Debug)]

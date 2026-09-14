@@ -3,7 +3,7 @@
 use bevy::{
     color::palettes::css::{BLUE, GREEN, INDIGO, LIME, ORANGE, RED, VIOLET, YELLOW},
     prelude::*,
-    ui::ColorStop,
+    ui::{ColorStop, MeshGradient, MeshGradientPoint},
     ui_widgets::{Activate, Button},
 };
 use std::f32::consts::TAU;
@@ -210,8 +210,37 @@ fn setup(mut commands: Commands) {
                     });
                 });
             }
+
+            let mesh = compact_mesh_gradient();
+            commands.spawn((
+                Node {
+                    width: px(150),
+                    height: px(90),
+                    border: UiRect::all(px(10)),
+                    border_radius: BorderRadius::all(px(20)),
+                    ..default()
+                },
+                BackgroundGradient::from(mesh.clone()),
+                BorderGradient::from(mesh),
+            ));
         })
         .add_child(buttons_id);
+}
+
+fn compact_mesh_gradient() -> MeshGradient {
+    MeshGradient::new(
+        2,
+        2,
+        [
+            (Vec2::new(0.0, 0.0), RED),
+            (Vec2::new(1.0, 0.0), LIME),
+            (Vec2::new(0.0, 1.0), INDIGO),
+            (Vec2::new(1.0, 1.0), BLUE),
+        ]
+        .map(|(position, color)| MeshGradientPoint::new(position, color.into()))
+        .to_vec(),
+    )
+    .expect("the example mesh must be valid")
 }
 
 /// Scene of the current color space, the previous button, and the next button.
@@ -305,11 +334,14 @@ fn on_activate_change_space(
     for mut gradients in gradients_query.iter_mut() {
         for gradient in gradients.0.iter_mut() {
             let space = match gradient {
-                Gradient::Linear(linear_gradient) => &mut linear_gradient.color_space,
-                Gradient::Radial(radial_gradient) => &mut radial_gradient.color_space,
-                Gradient::Conic(conic_gradient) => &mut conic_gradient.color_space,
+                Gradient::Linear(linear_gradient) => Some(&mut linear_gradient.color_space),
+                Gradient::Radial(radial_gradient) => Some(&mut radial_gradient.color_space),
+                Gradient::Conic(conic_gradient) => Some(&mut conic_gradient.color_space),
+                Gradient::Mesh(_) => None,
             };
-            *space = next_space;
+            if let Some(space) = space {
+                *space = next_space;
+            }
         }
     }
 }
