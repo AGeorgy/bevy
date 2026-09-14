@@ -140,6 +140,7 @@ fn main() {
             primary_window: Some(Window {
                 title: "Mesh Gradient".into(),
                 resolution: (1280, 800).into(),
+                fit_canvas_to_parent: true,
                 ..default()
             }),
             ..default()
