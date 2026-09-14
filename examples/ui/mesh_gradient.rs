@@ -12,7 +12,7 @@ use bevy::{
     platform::time::Instant,
     prelude::*,
     render::diagnostic::RenderDiagnosticsPlugin,
-    ui::{MeshGradient, MeshGradientError, MeshGradientPoint, Pressed},
+    ui::{MeshGradient, MeshGradientColorSpace, MeshGradientError, MeshGradientPoint, Pressed},
     ui_widgets::{Activate, Button, Slider, SliderRange, SliderThumb, SliderValue, ValueChange},
     window::{PresentMode, PrimaryWindow},
 };
@@ -21,6 +21,9 @@ const PANEL: Color = Color::srgb(0.075, 0.09, 0.125);
 const TEXT: Color = Color::srgb(0.88, 0.91, 0.96);
 const MUTED: Color = Color::srgb(0.56, 0.63, 0.73);
 const ACCENT: Color = Color::srgb(0.25, 0.72, 0.92);
+const DEFAULT_WIDTH: usize = 5;
+const DEFAULT_HEIGHT: usize = 4;
+const EDGE_DASHES: usize = 10;
 #[cfg(not(target_arch = "wasm32"))]
 const BENCHMARK_ENV: &str = "BEVY_MESH_GRADIENT_BENCHMARK";
 const BENCHMARK_WARMUP_FRAMES: usize = 300;
@@ -53,11 +56,17 @@ struct BenchmarkSamples {
 
 impl EditorState {
     fn new() -> Self {
-        let points = preset(3);
+        let points = preset(DEFAULT_WIDTH, DEFAULT_HEIGHT);
         Self {
-            mesh: MeshGradient::new(3, 3, points.clone()).expect("preset must be valid"),
+            mesh: MeshGradient::new_in_color_space(
+                DEFAULT_WIDTH,
+                DEFAULT_HEIGHT,
+                points.clone(),
+                MeshGradientColorSpace::Srgba,
+            )
+            .expect("preset must be valid"),
             rest: points,
-            selected: 4,
+            selected: 7,
             animate: false,
             elapsed: 0.0,
             show_background: true,
@@ -67,15 +76,15 @@ impl EditorState {
         }
     }
 
-    fn replace_grid(&mut self, size: usize) {
-        let points = preset(size);
-        match self.mesh.try_replace_grid(size, size, points.clone()) {
+    fn replace_grid(&mut self, width: usize, height: usize) {
+        let points = preset(width, height);
+        match self.mesh.try_replace_grid(width, height, points.clone()) {
             Ok(()) => {
                 self.rest = points;
-                self.selected = (size * size) / 2;
+                self.selected = (width * height) / 2;
                 self.animate = false;
                 self.elapsed = 0.0;
-                self.status = format!("Accepted atomic {size}x{size} grid replacement");
+                self.status = format!("Accepted atomic {width}x{height} grid replacement");
                 self.rebuild = true;
             }
             Err(error) => self.reject("grid replacement", error),
@@ -83,8 +92,8 @@ impl EditorState {
     }
 
     fn reset(&mut self) {
-        let size = self.mesh.width();
-        self.replace_grid(size);
+        let (width, height) = self.mesh.dimensions();
+        self.replace_grid(width, height);
         self.status = "Reset positions and colors".into();
     }
 
@@ -128,6 +137,13 @@ enum PreviewKind {
 struct ControlPoint(usize);
 
 #[derive(Component)]
+struct ControlEdge {
+    from: usize,
+    to: usize,
+    dash: usize,
+}
+
+#[derive(Component)]
 struct StateReadout;
 
 #[derive(Component)]
@@ -144,7 +160,7 @@ struct SliderVisual;
 
 #[derive(Component, Clone, Copy)]
 enum EditorAction {
-    Grid(usize),
+    Grid(usize, usize),
     Reset,
     ToggleAnimation,
     ToggleBackground,
@@ -203,26 +219,64 @@ fn main() {
     app.run();
 }
 
-fn preset(size: usize) -> Vec<MeshGradientPoint> {
-    (0..size * size)
+fn preset(width: usize, height: usize) -> Vec<MeshGradientPoint> {
+    const REFERENCE_COLORS: [[Color; DEFAULT_WIDTH]; DEFAULT_HEIGHT] = [
+        [
+            Color::srgb(0.02, 0.78, 0.72),
+            Color::srgb(0.04, 0.70, 0.80),
+            Color::srgb(0.05, 0.62, 0.85),
+            Color::srgb(0.06, 0.59, 0.86),
+            Color::srgb(0.08, 0.62, 0.88),
+        ],
+        [
+            Color::srgb(0.03, 0.57, 0.79),
+            Color::srgb(0.21, 0.50, 0.84),
+            Color::srgb(0.74, 0.25, 0.88),
+            Color::srgb(0.43, 0.36, 0.70),
+            Color::srgb(0.61, 0.43, 0.65),
+        ],
+        [
+            Color::srgb(0.28, 0.29, 0.81),
+            Color::srgb(0.45, 0.25, 0.77),
+            Color::srgb(0.91, 0.13, 0.64),
+            Color::srgb(0.94, 0.06, 0.48),
+            Color::srgb(0.98, 0.01, 0.29),
+        ],
+        [
+            Color::srgb(1.00, 0.43, 0.00),
+            Color::srgb(1.00, 0.58, 0.00),
+            Color::srgb(1.00, 0.78, 0.00),
+            Color::srgb(0.45, 0.78, 0.00),
+            Color::srgb(0.00, 0.72, 0.29),
+        ],
+    ];
+
+    (0..width * height)
         .map(|index| {
-            let column = index % size;
-            let row = index / size;
-            let x = column as f32 / (size - 1) as f32;
-            let y = row as f32 / (size - 1) as f32;
+            let column = index % width;
+            let row = index / width;
+            let x = column as f32 / (width - 1) as f32;
+            let y = row as f32 / (height - 1) as f32;
             let mut position = Vec2::new(x, y);
-            if column > 0 && column + 1 < size && row > 0 && row + 1 < size {
+            if (width, height) != (DEFAULT_WIDTH, DEFAULT_HEIGHT)
+                && column > 0
+                && column + 1 < width
+                && row > 0
+                && row + 1 < height
+            {
                 position += Vec2::new(0.045, -0.03);
             }
-            MeshGradientPoint::new(
-                position,
+            let color = if (width, height) == (DEFAULT_WIDTH, DEFAULT_HEIGHT) {
+                REFERENCE_COLORS[row][column]
+            } else {
                 Color::oklaba(
                     0.68 + 0.12 * x - 0.08 * y,
                     0.15 - 0.27 * x + 0.04 * y,
                     0.13 + 0.04 * x - 0.25 * y,
                     1.0 - 0.22 * x * y,
-                ),
-            )
+                )
+            };
+            MeshGradientPoint::new(position, color)
         })
         .collect()
 }
@@ -383,11 +437,41 @@ fn spawn_preview(
     }
     entity.with_children(|preview| {
         if editable {
+            let (width, height) = state.mesh.dimensions();
+            for row in 0..height {
+                for column in 0..width {
+                    let index = row * width + column;
+                    if column + 1 < width {
+                        spawn_control_edge(preview, index, index + 1);
+                    }
+                    if row + 1 < height {
+                        spawn_control_edge(preview, index, index + width);
+                    }
+                }
+            }
             for (index, point) in state.mesh.points().iter().enumerate() {
                 preview.spawn(control_point(index, point, index == state.selected));
             }
         }
     });
+}
+
+fn spawn_control_edge(parent: &mut ChildSpawnerCommands, from: usize, to: usize) {
+    for dash in 0..EDGE_DASHES {
+        parent.spawn((
+            ControlEdge { from, to, dash },
+            Pickable::IGNORE,
+            Node {
+                position_type: PositionType::Absolute,
+                width: px(0),
+                height: px(1.5),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.92, 0.96, 1.0, 0.62)),
+            UiTransform::IDENTITY,
+            GlobalZIndex(3),
+        ));
+    }
 }
 
 fn control_point(index: usize, point: &MeshGradientPoint, selected: bool) -> impl Bundle {
@@ -410,7 +494,8 @@ fn control_point(index: usize, point: &MeshGradientPoint, selected: bool) -> imp
         },
         UiTransform::from_translation(Val2::px(-diameter / 2.0, -diameter / 2.0)),
         BackgroundColor(point.color),
-        BorderColor::all(if selected { Color::WHITE } else { Color::BLACK }),
+        BorderColor::all(Color::WHITE),
+        BoxShadow::new(Color::BLACK.with_alpha(0.72), px(0), px(2), px(1), px(7)),
         GlobalZIndex(5),
     )
 }
@@ -431,9 +516,10 @@ fn spawn_inspector(parent: &mut ChildSpawnerCommands, state: &EditorState) {
             (
                 button_row(),
                 children![
-                    button("2x2", EditorAction::Grid(2)),
-                    button("3x3", EditorAction::Grid(3)),
-                    button("4x4", EditorAction::Grid(4)),
+                    button("5x4", EditorAction::Grid(5, 4)),
+                    button("2x2", EditorAction::Grid(2, 2)),
+                    button("3x3", EditorAction::Grid(3, 3)),
+                    button("4x4", EditorAction::Grid(4, 4)),
                 ]
             ),
             (
@@ -648,7 +734,7 @@ fn handle_action(
         return;
     };
     match *action {
-        EditorAction::Grid(size) => state.replace_grid(size),
+        EditorAction::Grid(width, height) => state.replace_grid(width, height),
         EditorAction::Reset => state.reset(),
         EditorAction::ToggleAnimation => {
             state.animate = !state.animate;
@@ -731,7 +817,7 @@ fn keyboard(keys: Res<ButtonInput<KeyCode>>, mut state: ResMut<EditorState>) {
         (KeyCode::Digit4, 4),
     ] {
         if keys.just_pressed(key) {
-            state.replace_grid(size);
+            state.replace_grid(size, size);
         }
     }
     if keys.just_pressed(KeyCode::KeyR) {
@@ -905,10 +991,22 @@ fn sync_editor(
     state: Res<EditorState>,
     mut previews: Query<(&PreviewKind, &mut BackgroundGradient, &mut BorderGradient)>,
     mut points: ControlPointVisuals,
+    canvas: Query<&ComputedNode, With<EditorCanvas>>,
+    mut edges: Query<
+        (&ControlEdge, &mut Node, &mut UiTransform),
+        (Without<ControlPoint>, Without<SliderVisual>),
+    >,
     mut readouts: Query<&mut Text, With<StateReadout>>,
     mut swatches: Query<&mut BackgroundColor, (With<SelectedSwatch>, Without<ControlPoint>)>,
     sliders: Query<(Entity, &ChannelSlider, &SliderValue, &Children)>,
-    mut slider_visuals: Query<&mut Node, (With<SliderVisual>, Without<ControlPoint>)>,
+    mut slider_visuals: Query<
+        &mut Node,
+        (
+            With<SliderVisual>,
+            Without<ControlPoint>,
+            Without<ControlEdge>,
+        ),
+    >,
     mut channel_values: Query<(&ChannelValue, &mut Text), Without<StateReadout>>,
 ) {
     let current: Gradient = state.mesh.clone().into();
@@ -948,7 +1046,28 @@ fn sync_editor(
         node.border = UiRect::all(px(if selected { 4.0 } else { 2.0 }));
         transform.translation = Val2::px(-diameter / 2.0, -diameter / 2.0);
         color.0 = point.color;
-        border.set_all(if selected { Color::WHITE } else { Color::BLACK });
+        border.set_all(Color::WHITE);
+    }
+
+    if let Ok(canvas) = canvas.single() {
+        let border = canvas.border();
+        let size =
+            (canvas.size() - border.min_inset - border.max_inset) * canvas.inverse_scale_factor();
+        for (edge, mut node, mut transform) in &mut edges {
+            let from = state.mesh.points()[edge.from].position * size;
+            let to = state.mesh.points()[edge.to].position * size;
+            let fraction = edge.dash as f32 / EDGE_DASHES as f32;
+            let next_fraction = (edge.dash as f32 + 0.58) / EDGE_DASHES as f32;
+            let start = from.lerp(to, fraction);
+            let end = from.lerp(to, next_fraction);
+            let delta = end - start;
+            let length = delta.length();
+            let midpoint = (start + end) * 0.5;
+            node.left = px(midpoint.x - length * 0.5);
+            node.top = px(midpoint.y - 0.75);
+            node.width = px(length);
+            transform.rotation = Rot2::radians(ops::atan2(delta.y, delta.x));
+        }
     }
 
     let selected = state.mesh.points()[state.selected];
@@ -998,7 +1117,7 @@ fn style_buttons(
 ) {
     for (action, hovered, pressed, mut background, mut border) in &mut buttons {
         let active = match *action {
-            EditorAction::Grid(size) => state.mesh.width() == size,
+            EditorAction::Grid(width, height) => state.mesh.dimensions() == (width, height),
             EditorAction::ToggleAnimation => state.animate,
             EditorAction::ToggleBackground => state.show_background,
             EditorAction::ToggleBorder => state.show_border,
