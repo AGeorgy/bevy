@@ -7,6 +7,9 @@ use bevy_text::{EmSize, RemSize};
 use bevy_utils::default;
 use core::{f32, f32::consts::TAU};
 
+mod mesh_gradient;
+pub use mesh_gradient::*;
+
 /// A color stop for a gradient
 #[derive(Debug, Copy, Clone, PartialEq, Reflect)]
 #[reflect(Default, PartialEq, Debug)]
@@ -475,6 +478,9 @@ pub enum Gradient {
     ///
     /// <https://developer.mozilla.org/en-US/docs/Web/CSS/gradient/conic-gradient>
     Conic(ConicGradient),
+    /// A smooth two-dimensional gradient controlled by a checked grid of
+    /// colored points.
+    Mesh(MeshGradient),
 }
 
 impl Gradient {
@@ -484,6 +490,7 @@ impl Gradient {
             Gradient::Linear(gradient) => gradient.stops.is_empty(),
             Gradient::Radial(gradient) => gradient.stops.is_empty(),
             Gradient::Conic(gradient) => gradient.stops.is_empty(),
+            Gradient::Mesh(_) => false,
         }
     }
 
@@ -502,6 +509,7 @@ impl Gradient {
                 .stops
                 .first()
                 .and_then(|stop| (gradient.stops.len() == 1).then_some(stop.color)),
+            Gradient::Mesh(_) => None,
         }
     }
 
@@ -511,6 +519,7 @@ impl Gradient {
             Gradient::Linear(linear_gradient) => linear_gradient.color_space,
             Gradient::Radial(radial_gradient) => radial_gradient.color_space,
             Gradient::Conic(conic_gradient) => conic_gradient.color_space,
+            Gradient::Mesh(mesh_gradient) => mesh_gradient.color_space().into(),
         }
     }
 }
@@ -530,6 +539,12 @@ impl From<RadialGradient> for Gradient {
 impl From<ConicGradient> for Gradient {
     fn from(value: ConicGradient) -> Self {
         Self::Conic(value)
+    }
+}
+
+impl From<MeshGradient> for Gradient {
+    fn from(value: MeshGradient) -> Self {
+        Self::Mesh(value)
     }
 }
 
@@ -564,6 +579,22 @@ impl<T: Into<Gradient>> From<T> for BorderGradient {
         Self(vec![value.into()])
     }
 }
+
+/// Shows the adaptive triangle topology over mesh-gradient layers on this UI node.
+///
+/// The overlay displays the patch-local, anisotropic topology selected from
+/// geometric curvature, physical on-screen size, and the selected color
+/// interpolation mode. In vertex mode, color approximation can request extra
+/// subdivisions; bicubic color is evaluated in the fragment shader. Other
+/// gradient types on the node ignore this marker.
+#[derive(Component, Clone, Copy, Debug, Default, Reflect)]
+#[reflect(Component, Default, Debug, Clone)]
+#[cfg_attr(
+    feature = "serialize",
+    derive(serde::Serialize, serde::Deserialize),
+    reflect(Serialize, Deserialize)
+)]
+pub struct MeshGradientWireframe;
 
 #[derive(Default, Copy, Clone, PartialEq, Debug, Reflect)]
 #[reflect(PartialEq, Default)]

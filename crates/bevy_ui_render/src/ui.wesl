@@ -188,15 +188,14 @@ fn antialias(distance: f32) -> f32 {
     return saturate(0.5 - distance);
 }
 
-fn draw_uinode_border(
-    color: vec4<f32>,
+fn uinode_border_coverage(
     point: vec2<f32>,
     size: vec2<f32>,
     radius_x: vec4<f32>,
     radius_y: vec4<f32>,
     border: vec4<f32>,
     flags: u32,
-) -> vec4<f32> {
+) -> f32 {
     // Signed distances. The magnitude is the distance of the point from the edge of the shape.
     // * Negative values indicate that the point is inside the shape.
     // * Zero values indicate the point is on the edge of the shape.
@@ -227,8 +226,40 @@ fn draw_uinode_border(
     @else
     let t = 1.0 - step(0.0, border_distance);
 
+    return saturate(t * nearest_border);
+}
+
+fn draw_uinode_border(
+    color: vec4<f32>,
+    point: vec2<f32>,
+    size: vec2<f32>,
+    radius_x: vec4<f32>,
+    radius_y: vec4<f32>,
+    border: vec4<f32>,
+    flags: u32,
+) -> vec4<f32> {
+    let coverage = uinode_border_coverage(point, size, radius_x, radius_y, border, flags);
     // Blend mode ALPHA_BLENDING is used for UI elements, so we don't premultiply alpha here.
-    return vec4(color.rgb, saturate(color.a * t * nearest_border));
+    return vec4(color.rgb, saturate(color.a * coverage));
+}
+
+fn uinode_background_coverage(
+    point: vec2<f32>,
+    size: vec2<f32>,
+    radius_x: vec4<f32>,
+    radius_y: vec4<f32>,
+    border: vec4<f32>,
+    flags: u32,
+) -> f32 {
+    // When drawing the background only draw the internal area and not the border.
+    let internal_distance = sd_inset_rounded_box(point, size, radius_x, radius_y, border) * select(1., -1, enabled(flags, INVERT));
+
+    @if(ANTI_ALIAS)
+    let t = antialias(internal_distance);
+    @else
+    let t = 1.0 - step(0.0, internal_distance);
+
+    return saturate(t);
 }
 
 fn draw_uinode_background(
@@ -240,15 +271,8 @@ fn draw_uinode_background(
     border: vec4<f32>,
     flags: u32,
 ) -> vec4<f32> {
-    // When drawing the background only draw the internal area and not the border.
-    let internal_distance = sd_inset_rounded_box(point, size, radius_x, radius_y, border) * select(1., -1, enabled(flags, INVERT));
-
-    @if(ANTI_ALIAS)
-    let t = antialias(internal_distance);
-    @else
-    let t = 1.0 - step(0.0, internal_distance);
-
-    return vec4(color.rgb, saturate(color.a * t));
+    let coverage = uinode_background_coverage(point, size, radius_x, radius_y, border, flags);
+    return vec4(color.rgb, saturate(color.a * coverage));
 }
 
 @fragment
