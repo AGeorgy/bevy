@@ -99,7 +99,6 @@ fn main() {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, States, Default)]
-#[states(scoped_entities)]
 enum Scene {
     #[default]
     Image,
