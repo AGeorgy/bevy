@@ -4447,6 +4447,9 @@ mod inline_image {
                 (InlineImage {
                     color: Color::WHITE,
                     image: asset_server.load("branding/bevy_logo_dark.png"),
+                    height: Some(20.),
+                    flip_x: true,
+                    ..default()
                 },),
                 (TextSpan::new(" after image"),),
             ],
