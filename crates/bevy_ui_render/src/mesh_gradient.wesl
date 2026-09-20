@@ -48,6 +48,7 @@ struct MeshVertexOutput {
     @if(BICUBIC_COLOR)
     @location(1) @interpolate(flat) patch_index: vec2<u32>,
     @location(2) local_point: vec2<f32>,
+    @if(MESH_CLIPPED)
     @location(3) world_point: vec2<f32>,
     @builtin(position) position: vec4<f32>,
 };
@@ -311,6 +312,7 @@ fn vertex(
 @if(BICUBIC_COLOR)
     out.patch_index = patch_index;
     out.local_point = local_point;
+@if(MESH_CLIPPED)
     out.world_point = world_point;
     return out;
 }
@@ -343,10 +345,6 @@ fn convert_to_linear_rgba(color: vec4<f32>) -> vec4<f32> {
 
 @fragment
 fn fragment(in: MeshVertexOutput) -> @location(0) vec4<f32> {
-@if(MESH_CLIPPED)
-    if outside_clip(in.world_point) {
-        discard;
-    }
     let flags = mesh.metadata.w;
 @if(MESH_BORDER)
     let coverage = uinode_border_coverage(
@@ -369,13 +367,17 @@ fn fragment(in: MeshVertexOutput) -> @location(0) vec4<f32> {
     if coverage <= 0.0 {
         discard;
     }
+@if(MESH_CLIPPED)
+    if outside_clip(in.world_point) {
+        discard;
+    }
 @if(VERTEX_COLOR)
     let interpolation_color = in.interpolation_color;
 @if(BICUBIC_COLOR)
     let interpolation_color = bicubic_surface_color(in.patch_index, in.uv);
 @if(VERTEX_COLOR && IN_LINEAR_RGB)
-    var color = interpolation_color;
+    let color = interpolation_color;
 @else
-    var color = convert_to_linear_rgba(interpolation_color);
+    let color = convert_to_linear_rgba(interpolation_color);
     return vec4(color.rgb, saturate(color.a * coverage));
 }

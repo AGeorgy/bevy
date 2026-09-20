@@ -55,14 +55,14 @@ impl MeshGradientPoint {
     reflect(Serialize, Deserialize)
 )]
 pub enum MeshGradientColorSpace {
-    /// Interpolate in `OKLab` for perceptually smoother transitions. This is
-    /// the default.
-    #[default]
+    /// Interpolate in `OKLab` for perceptually smoother transitions.
     Oklaba,
     /// Interpolate in sRGB.
     Srgba,
     /// Interpolate in linear RGB. This is the fastest option because the
-    /// fragment shader does not need a color-space conversion.
+    /// fragment shader does not need a color-space conversion. This is the
+    /// default.
+    #[default]
     LinearRgba,
 }
 
@@ -257,10 +257,10 @@ pub enum MeshGradientError {
 /// it can overshoot the neighboring color coordinates. Derived alpha is
 /// clamped by the renderer. Input alpha must be in `[0, 1]`, and all input and
 /// derived control values must remain finite.
-/// Colors interpolate in `OKLab` by default; `sRGB` and linear RGB are also
+/// Colors interpolate in linear RGB by default; `OKLab` and `sRGB` are also
 /// available through [`MeshGradientColorSpace`]. Alpha always interpolates
-/// separately from the color coordinates. Linear RGB avoids fragment color
-/// conversion and is the lowest-cost option.
+/// separately from the color coordinates. The linear RGB default avoids
+/// fragment color conversion and is the lowest-cost option.
 ///
 /// The renderer chooses crack-free adaptive tessellation from patch-local
 /// curvature, the transform, and physical on-screen size. Each bicubic patch
@@ -955,6 +955,17 @@ mod tests {
                 ]
             })
             .collect()
+    }
+
+    #[test]
+    fn defaults_to_the_mobile_friendly_color_path() {
+        let mesh = MeshGradient::new(2, 2, regular_grid(2, 2)).unwrap();
+
+        assert_eq!(mesh.color_space(), MeshGradientColorSpace::LinearRgba);
+        assert_eq!(
+            mesh.color_interpolation(),
+            MeshGradientColorInterpolation::Vertex
+        );
     }
 
     #[test]

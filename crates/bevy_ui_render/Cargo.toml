@@ -45,6 +45,9 @@ tracing = { version = "0.1", default-features = false, features = ["std"] }
 indexmap = { version = "2" }
 smallvec = { version = "1", default-features = false }
 
+[dev-dependencies]
+naga = { version = "30", features = ["wgsl-in"] }
+
 [features]
 default = ["bevy_ui_debug"]
 serialize = ["bevy_math/serialize", "bevy_platform/serialize"]

@@ -39,7 +39,7 @@ use bevy_render::{
     Extract, ExtractSchedule, Render, RenderSystems,
 };
 use bevy_render::{GpuResourceAppExt, RenderStartup};
-use bevy_shader::Shader;
+use bevy_shader::{Shader, ShaderDefVal};
 use bevy_sprite::BorderRect;
 use bevy_text::{EmSize, RemSize};
 use bevy_ui::{
@@ -180,7 +180,7 @@ pub fn compute_gradient_line_length(angle: f32, size: Vec2) -> f32 {
     (t_pos - t_neg).abs()
 }
 
-#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct UiGradientPipelineKey {
     anti_alias: bool,
     color_space: InterpolationColorSpace,
@@ -206,6 +206,45 @@ fn mesh_gradient_primitive_state(cull_folds: bool, flipped: bool) -> PrimitiveSt
         cull_mode: cull_folds.then_some(Face::Back),
         ..default()
     }
+}
+
+fn gradient_shader_defs(key: UiGradientPipelineKey) -> Vec<ShaderDefVal> {
+    let color_space = match key.color_space {
+        InterpolationColorSpace::Oklaba => "IN_OKLAB",
+        InterpolationColorSpace::Oklcha => "IN_OKLCH",
+        InterpolationColorSpace::OklchaLong => "IN_OKLCH_LONG",
+        InterpolationColorSpace::Okhsla => "IN_OKHSL",
+        InterpolationColorSpace::OkhslaLong => "IN_OKHSL_LONG",
+        InterpolationColorSpace::Srgba => "IN_SRGB",
+        InterpolationColorSpace::LinearRgba => "IN_LINEAR_RGB",
+        InterpolationColorSpace::Hsla => "IN_HSL",
+        InterpolationColorSpace::HslaLong => "IN_HSL_LONG",
+        InterpolationColorSpace::Hsva => "IN_HSV",
+        InterpolationColorSpace::HsvaLong => "IN_HSV_LONG",
+    };
+
+    let mut shader_defs = vec![color_space.into()];
+    if key.anti_alias {
+        shader_defs.push("ANTI_ALIAS".into());
+    }
+    if !key.mesh {
+        return shader_defs;
+    }
+
+    match key.mesh_color_interpolation {
+        MeshGradientColorInterpolation::Vertex => shader_defs.push("VERTEX_COLOR".into()),
+        MeshGradientColorInterpolation::Bicubic => {
+            shader_defs.push("BICUBIC_COLOR".into());
+            shader_defs.push("MESH_PARAMETER_UV".into());
+        }
+    }
+    if key.mesh_border {
+        shader_defs.push("MESH_BORDER".into());
+    }
+    if key.mesh_clipped {
+        shader_defs.push("MESH_CLIPPED".into());
+    }
+    shader_defs
 }
 
 impl SpecializedRenderPipeline for GradientPipeline {
@@ -254,40 +293,7 @@ impl SpecializedRenderPipeline for GradientPipeline {
                 ],
             )
         };
-        let color_space = match key.color_space {
-            InterpolationColorSpace::Oklaba => "IN_OKLAB",
-            InterpolationColorSpace::Oklcha => "IN_OKLCH",
-            InterpolationColorSpace::OklchaLong => "IN_OKLCH_LONG",
-            InterpolationColorSpace::Okhsla => "IN_OKHSL",
-            InterpolationColorSpace::OkhslaLong => "IN_OKHSL_LONG",
-            InterpolationColorSpace::Srgba => "IN_SRGB",
-            InterpolationColorSpace::LinearRgba => "IN_LINEAR_RGB",
-            InterpolationColorSpace::Hsla => "IN_HSL",
-            InterpolationColorSpace::HslaLong => "IN_HSL_LONG",
-            InterpolationColorSpace::Hsva => "IN_HSV",
-            InterpolationColorSpace::HsvaLong => "IN_HSV_LONG",
-        };
-
-        let mut shader_defs = if key.anti_alias {
-            vec![color_space.into(), "ANTI_ALIAS".into()]
-        } else {
-            vec![color_space.into()]
-        };
-        match key.mesh_color_interpolation {
-            MeshGradientColorInterpolation::Vertex => shader_defs.push("VERTEX_COLOR".into()),
-            MeshGradientColorInterpolation::Bicubic => {
-                shader_defs.push("BICUBIC_COLOR".into());
-            }
-        }
-        if key.mesh_color_interpolation == MeshGradientColorInterpolation::Bicubic {
-            shader_defs.push("MESH_PARAMETER_UV".into());
-        }
-        if key.mesh_border {
-            shader_defs.push("MESH_BORDER".into());
-        }
-        if key.mesh_clipped {
-            shader_defs.push("MESH_CLIPPED".into());
-        }
+        let shader_defs = gradient_shader_defs(key);
 
         let shader = if key.mesh {
             self.mesh_shader.clone()
@@ -1821,7 +1827,9 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMeshGradient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy_asset::{uuid::Uuid, AssetId};
     use bevy_color::Color;
+    use bevy_shader::{ShaderCache, ShaderCacheSource};
     use bevy_ui::{CalculatedClipRect, MeshGradientColorSpace, MeshGradientPoint};
     use smallvec::SmallVec;
 
@@ -1838,6 +1846,107 @@ mod tests {
         }
         MeshGradient::new_in_color_space(16, 16, points, MeshGradientColorSpace::LinearRgba)
             .unwrap()
+    }
+
+    fn shader_id(value: u128) -> AssetId<Shader> {
+        AssetId::Uuid {
+            uuid: Uuid::from_u128(value),
+        }
+    }
+
+    fn mesh_shader_cache() -> (ShaderCache<String, ()>, AssetId<Shader>) {
+        let mut cache = ShaderCache::new((), |_, source, _| match source {
+            ShaderCacheSource::Wgsl(source) => {
+                let module = naga::front::wgsl::parse_str(&source)
+                    .unwrap_or_else(|error| panic!("generated WGSL did not parse: {error}"));
+                naga::valid::Validator::new(
+                    naga::valid::ValidationFlags::all(),
+                    naga::valid::Capabilities::empty(),
+                )
+                .validate(&module)
+                .unwrap_or_else(|error| panic!("generated WGSL did not validate: {error}"));
+                Ok(source)
+            }
+            ShaderCacheSource::SpirV(_) => panic!("mesh gradients use WESL"),
+        });
+        let shaders = [
+            (
+                shader_id(1),
+                "embedded://bevy_ui_render/mesh_gradient.wesl",
+                include_str!("mesh_gradient.wesl"),
+            ),
+            (
+                shader_id(2),
+                "embedded://bevy_ui_render/ui.wesl",
+                include_str!("ui.wesl"),
+            ),
+            (
+                shader_id(3),
+                "embedded://bevy_render/view.wesl",
+                include_str!("../../bevy_render/src/view.wesl"),
+            ),
+            (
+                shader_id(4),
+                "embedded://bevy_render/color_operations.wesl",
+                include_str!("../../bevy_render/src/color_operations.wesl"),
+            ),
+            (
+                shader_id(5),
+                "embedded://bevy_render/maths.wesl",
+                include_str!("../../bevy_render/src/maths.wesl"),
+            ),
+        ];
+        for (id, path, source) in shaders {
+            cache.set_shader(id, Shader::from_wesl(source, path));
+        }
+        (cache, shader_id(1))
+    }
+
+    #[test]
+    fn every_mesh_shader_permutation_compiles() {
+        let (mut cache, shader_id) = mesh_shader_cache();
+        let mut permutation = 0;
+
+        for anti_alias in [false, true] {
+            for color_space in [
+                InterpolationColorSpace::LinearRgba,
+                InterpolationColorSpace::Srgba,
+                InterpolationColorSpace::Oklaba,
+            ] {
+                for mesh_color_interpolation in [
+                    MeshGradientColorInterpolation::Vertex,
+                    MeshGradientColorInterpolation::Bicubic,
+                ] {
+                    for mesh_border in [false, true] {
+                        for mesh_clipped in [false, true] {
+                            let key = UiGradientPipelineKey {
+                                anti_alias,
+                                color_space,
+                                mesh: true,
+                                mesh_color_interpolation,
+                                mesh_border,
+                                mesh_clipped,
+                                mesh_cull_folds: false,
+                                mesh_flipped: false,
+                                target_format: TextureFormat::Rgba8UnormSrgb,
+                            };
+                            let compiled = cache
+                                .get(permutation, shader_id, &gradient_shader_defs(key))
+                                .unwrap_or_else(|error| {
+                                    panic!("mesh-gradient permutation {key:?} failed: {error}")
+                                });
+
+                            assert!(compiled.contains("fn vertex"));
+                            assert!(compiled.contains("fn fragment"));
+                            assert_eq!(compiled.contains("world_point: vec2<f32>"), mesh_clipped);
+                            permutation += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        assert_eq!(permutation, 48);
     }
 
     #[test]
