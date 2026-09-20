@@ -45,8 +45,8 @@ use bevy_text::{EmSize, RemSize};
 use bevy_ui::{
     BackgroundGradient, BorderGradient, ColorStop, ComputedStackIndex, ComputedUiRenderTargetInfo,
     ConicGradient, Gradient, InterpolationColorSpace, LinearGradient, MeshGradient,
-    MeshGradientColorInterpolation, MeshGradientGeometry, MeshGradientWireframe, RadialGradient,
-    ResolvedBorderRadius, Val, MAX_MESH_GRADIENT_DIMENSION,
+    MeshGradientColorInterpolation, MeshGradientGeometry, RadialGradient, ResolvedBorderRadius,
+    Val, MAX_MESH_GRADIENT_DIMENSION,
 };
 use bevy_utils::default;
 use bytemuck::{cast_slice, Pod, Zeroable};
@@ -186,7 +186,6 @@ pub struct UiGradientPipelineKey {
     color_space: InterpolationColorSpace,
     mesh: bool,
     mesh_color_interpolation: MeshGradientColorInterpolation,
-    mesh_wireframe: bool,
     mesh_border: bool,
     mesh_clipped: bool,
     mesh_cull_folds: bool,
@@ -280,13 +279,8 @@ impl SpecializedRenderPipeline for GradientPipeline {
                 shader_defs.push("BICUBIC_COLOR".into());
             }
         }
-        if key.mesh_wireframe
-            || key.mesh_color_interpolation == MeshGradientColorInterpolation::Bicubic
-        {
+        if key.mesh_color_interpolation == MeshGradientColorInterpolation::Bicubic {
             shader_defs.push("MESH_PARAMETER_UV".into());
-        }
-        if key.mesh_wireframe {
-            shader_defs.push("MESH_WIREFRAME".into());
         }
         if key.mesh_border {
             shader_defs.push("MESH_BORDER".into());
@@ -359,7 +353,6 @@ pub struct ResolvedMeshGradient {
     bounds: Arc<SurfaceBounds>,
     id: MeshGradientId,
     display_scale: f32,
-    wireframe: bool,
 }
 
 #[derive(Resource, Default)]
@@ -533,7 +526,6 @@ pub fn extract_gradients(
                 &UiGlobalTransform,
                 &InheritedVisibility,
                 Option<&CalculatedClip>,
-                Option<&MeshGradientWireframe>,
                 AnyOf<(&BackgroundGradient, &BorderGradient)>,
             ),
             Or<(
@@ -544,7 +536,6 @@ pub fn extract_gradients(
                 Changed<UiGlobalTransform>,
                 Changed<InheritedVisibility>,
                 Changed<CalculatedClip>,
-                Changed<MeshGradientWireframe>,
                 Changed<BackgroundGradient>,
                 Changed<BorderGradient>,
             )>,
@@ -560,7 +551,6 @@ pub fn extract_gradients(
             &UiGlobalTransform,
             &InheritedVisibility,
             Option<&CalculatedClip>,
-            Option<&MeshGradientWireframe>,
             AnyOf<(&BackgroundGradient, &BorderGradient)>,
         )>,
     >,
@@ -572,7 +562,6 @@ pub fn extract_gradients(
         mut removed_ui_global_transform_query,
         mut removed_inherited_visibility_query,
         mut removed_calculated_clip_query,
-        mut removed_mesh_gradient_wireframe_query,
         mut removed_background_gradient_query,
         mut removed_border_gradient_query,
     ): (
@@ -583,7 +572,6 @@ pub fn extract_gradients(
         Extract<RemovedComponents<UiGlobalTransform>>,
         Extract<RemovedComponents<InheritedVisibility>>,
         Extract<RemovedComponents<CalculatedClip>>,
-        Extract<RemovedComponents<MeshGradientWireframe>>,
         Extract<RemovedComponents<BackgroundGradient>>,
         Extract<RemovedComponents<BorderGradient>>,
     ),
@@ -603,12 +591,10 @@ pub fn extract_gradients(
         transform,
         inherited_visibility,
         clip,
-        wireframe,
         (gradient, gradient_border),
     ) in gradients_query.iter().chain(
         removed_calculated_clip_query
             .read()
-            .chain(removed_mesh_gradient_wireframe_query.read())
             .filter_map(|entity| unfilitered_gradients_query.get(entity).ok()),
     ) {
         let main_entity = MainEntity::from(entity);
@@ -889,7 +875,6 @@ pub fn extract_gradients(
                                             bounds: surface_cache.get(id, mesh),
                                             id,
                                             display_scale: target.scale_factor(),
-                                            wireframe: wireframe.is_some(),
                                         },
                                     ),
                                     color_space: mesh.color_space().into(),
@@ -974,10 +959,6 @@ pub fn queue_gradient(
                 ResolvedGradient::Mesh(mesh) => mesh.mesh.color_interpolation(),
                 _ => MeshGradientColorInterpolation::Vertex,
             };
-            let mesh_wireframe = matches!(
-                &gradient.resolved_gradient,
-                ResolvedGradient::Mesh(mesh) if mesh.wireframe
-            );
             let mesh_border = gradient.resolved_gradient.is_mesh()
                 && matches!(gradient.node_type, NodeType::Border(_));
             let mesh_clipped = gradient.resolved_gradient.is_mesh() && gradient.clip.is_some();
@@ -994,7 +975,6 @@ pub fn queue_gradient(
                     color_space: gradient.color_space,
                     mesh: gradient.resolved_gradient.is_mesh(),
                     mesh_color_interpolation,
-                    mesh_wireframe,
                     mesh_border,
                     mesh_clipped,
                     mesh_cull_folds,
@@ -1283,7 +1263,6 @@ struct MeshGradientStyleUniform {
     radius_y: Vec4,
     border: Vec4,
     size: Vec4,
-    tessellation: Vec4,
     metadata: UVec4,
 }
 
@@ -1509,7 +1488,6 @@ fn mesh_gradient_points_uniform(mesh: &MeshGradient) -> MeshGradientPointsUnifor
 fn mesh_gradient_style_uniform(
     gradient: &ExtractedGradient,
     mesh: &MeshGradient,
-    wireframe: bool,
 ) -> Result<(MeshGradientStyleUniform, Option<MeshGradientClipUniform>), MeshUniformError> {
     let size = gradient.rect.size();
     if !size.is_finite()
@@ -1597,7 +1575,6 @@ fn mesh_gradient_style_uniform(
             gradient.border.max_inset.y,
         ),
         size: size.extend(0.0).extend(0.0),
-        tessellation: Vec4::new(u32::from(wireframe) as f32, 1.0, 0.68, 0.0),
         metadata: UVec4::new(mesh.width() as u32, mesh.height() as u32, 0, flags),
     };
     Ok((style, clip_uniform))
@@ -1681,11 +1658,8 @@ fn prepare_mesh_gradients(
                 continue;
             }
 
-            let (style_value, clip_value) = match mesh_gradient_style_uniform(
-                gradient,
-                &mesh.mesh,
-                mesh.wireframe,
-            ) {
+            let (style_value, clip_value) = match mesh_gradient_style_uniform(gradient, &mesh.mesh)
+            {
                 Ok(uniform) => uniform,
                 Err(MeshUniformError::FullyClipped) => continue,
                 Err(error) => {
@@ -1916,10 +1890,9 @@ mod tests {
         assert!(MeshGradientClipUniform::SHADER_SIZE.get() <= 16 * 1024);
         let mesh = full_capacity_mesh();
         let points = mesh_gradient_points_uniform(&mesh);
-        let (style, clip) = mesh_gradient_style_uniform(&extracted(None), &mesh, true).unwrap();
+        let (style, clip) = mesh_gradient_style_uniform(&extracted(None), &mesh).unwrap();
         assert!(clip.is_none());
         assert_eq!(style.metadata, UVec4::new(16, 16, 0, 0));
-        assert_eq!(style.tessellation, Vec4::new(1.0, 1.0, 0.68, 0.0));
         assert_eq!(
             Vec2::new(points.positions[0].x, points.positions[0].y),
             Vec2::ZERO
@@ -1942,7 +1915,6 @@ mod tests {
                 clip_rect,
             ])))),
             &full_capacity_mesh(),
-            false,
         )
         .unwrap();
         let clip = clip.unwrap();
@@ -1965,7 +1937,6 @@ mod tests {
             mesh_gradient_style_uniform(
                 &extracted(Some(CalculatedClip::Rects(clips))),
                 &full_capacity_mesh(),
-                false,
             ),
             Err(MeshUniformError::TooManyClips(count)) if count == MAX_MESH_GRADIENT_CLIPS + 1
         ));

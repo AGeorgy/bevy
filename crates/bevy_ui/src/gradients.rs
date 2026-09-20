@@ -580,22 +580,6 @@ impl<T: Into<Gradient>> From<T> for BorderGradient {
     }
 }
 
-/// Shows the adaptive triangle topology over mesh-gradient layers on this UI node.
-///
-/// The overlay displays the patch-local, anisotropic topology selected from
-/// geometric curvature, physical on-screen size, and the selected color
-/// interpolation mode. In vertex mode, color approximation can request extra
-/// subdivisions; bicubic color is evaluated in the fragment shader. Other
-/// gradient types on the node ignore this marker.
-#[derive(Component, Clone, Copy, Debug, Default, Reflect)]
-#[reflect(Component, Default, Debug, Clone)]
-#[cfg_attr(
-    feature = "serialize",
-    derive(serde::Serialize, serde::Deserialize),
-    reflect(Serialize, Deserialize)
-)]
-pub struct MeshGradientWireframe;
-
 #[derive(Default, Copy, Clone, PartialEq, Debug, Reflect)]
 #[reflect(PartialEq, Default)]
 #[cfg_attr(

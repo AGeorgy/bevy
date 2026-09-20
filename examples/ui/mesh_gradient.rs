@@ -5,9 +5,6 @@
 //! surface is rejected, both previews retain the last valid mesh.
 //!
 //! **Debug UI** toggles the dashed control grid and draggable point circles.
-//! **Tessellation** overlays the actual adaptive triangle topology. The renderer
-//! chooses subdivision independently for each patch and axis, while the shader
-//! stitches finer patch edges to neighboring coarse edges without cracks.
 //! **Vertex** evaluates colors at tessellation vertices and is the mobile
 //! default. **Bicubic** evaluates the smooth Catmull-Rom color surface per
 //! fragment. Every patch starts at 2x2 subdivisions. Adaptive refinement bounds
@@ -21,7 +18,7 @@ use bevy::{
     prelude::*,
     ui::{
         MeshGradient, MeshGradientColorInterpolation, MeshGradientColorSpace, MeshGradientError,
-        MeshGradientGeometry, MeshGradientPoint, MeshGradientWireframe, Pressed,
+        MeshGradientGeometry, MeshGradientPoint, Pressed,
     },
     ui_widgets::{Activate, Button, Slider, SliderRange, SliderThumb, SliderValue, ValueChange},
     window::PrimaryWindow,
@@ -45,7 +42,6 @@ struct EditorState {
     show_background: bool,
     show_border: bool,
     show_debug_ui: bool,
-    show_tessellation: bool,
     rebuild: bool,
     status: String,
 }
@@ -70,7 +66,6 @@ impl EditorState {
             show_background: true,
             show_border: true,
             show_debug_ui: true,
-            show_tessellation: false,
             rebuild: true,
             status: "Ready: drag a point or select it to edit RGBA".into(),
         }
@@ -177,7 +172,6 @@ enum EditorAction {
     ToggleBackground,
     ToggleBorder,
     ToggleDebugUi,
-    ToggleTessellation,
     SetColorInterpolation(MeshGradientColorInterpolation),
     SetColorSpace(MeshGradientColorSpace),
 }
@@ -431,9 +425,6 @@ fn spawn_preview(
     if editable {
         entity.insert(EditorCanvas);
     }
-    if editable && state.show_tessellation {
-        entity.insert(MeshGradientWireframe);
-    }
     entity.with_children(|preview| {
         if editable {
             let (width, height) = state.mesh.dimensions();
@@ -640,10 +631,7 @@ fn spawn_inspector(parent: &mut ChildSpawnerCommands, state: &EditorState) {
             ),
             (
                 button_row(),
-                children![
-                    button("Debug UI", EditorAction::ToggleDebugUi),
-                    button("Tessellation", EditorAction::ToggleTessellation),
-                ]
+                children![button("Debug UI", EditorAction::ToggleDebugUi)]
             ),
             (
                 StateReadout,
@@ -797,13 +785,6 @@ fn handle_action(
         EditorAction::ToggleDebugUi => {
             state.show_debug_ui = !state.show_debug_ui;
             state.status = format!("Control grid visible: {}", state.show_debug_ui);
-        }
-        EditorAction::ToggleTessellation => {
-            state.show_tessellation = !state.show_tessellation;
-            state.status = format!(
-                "Adaptive tessellation wireframe visible: {}",
-                state.show_tessellation
-            );
         }
         EditorAction::SetColorInterpolation(interpolation) => {
             state.mesh.set_color_interpolation(interpolation);
@@ -987,13 +968,7 @@ type ControlPointVisuals<'w, 's> = Query<
 fn sync_editor(
     mut commands: Commands,
     state: Res<EditorState>,
-    mut previews: Query<(
-        Entity,
-        &PreviewKind,
-        Has<MeshGradientWireframe>,
-        &mut BackgroundGradient,
-        &mut BorderGradient,
-    )>,
+    mut previews: Query<(&PreviewKind, &mut BackgroundGradient, &mut BorderGradient)>,
     mut points: ControlPointVisuals,
     canvas: Query<Ref<ComputedNode>, With<EditorCanvas>>,
     mut edges: Query<
@@ -1019,7 +994,7 @@ fn sync_editor(
     }
 
     let current: Gradient = state.mesh.clone().into();
-    for (entity, kind, has_wireframe, mut background, mut border) in &mut previews {
+    for (kind, mut background, mut border) in &mut previews {
         match kind {
             PreviewKind::Background => {
                 background.set_if_neq(BackgroundGradient(
@@ -1030,13 +1005,6 @@ fn sync_editor(
                         .collect(),
                 ));
                 border.set_if_neq(BorderGradient::default());
-                if state.show_tessellation != has_wireframe {
-                    if state.show_tessellation {
-                        commands.entity(entity).insert(MeshGradientWireframe);
-                    } else {
-                        commands.entity(entity).remove::<MeshGradientWireframe>();
-                    }
-                }
             }
             PreviewKind::Border => {
                 background.set_if_neq(BackgroundGradient::default());
@@ -1100,7 +1068,7 @@ fn sync_editor(
     let rgba = selected.color.to_srgba().to_f32_array();
     for mut text in &mut readouts {
         text.0 = format!(
-            "Point {} | pos [{:.3}, {:.3}] | RGBA [{:.2}, {:.2}, {:.2}, {:.2}]\nColor: {:?} / {:?} | Tessellation: adaptive (2x2 base, up to 4px) | Animation: {} | {}",
+            "Point {} | pos [{:.3}, {:.3}] | RGBA [{:.2}, {:.2}, {:.2}, {:.2}]\nColor: {:?} / {:?} | Animation: {} | {}",
             state.selected,
             selected.position.x,
             selected.position.y,
@@ -1150,7 +1118,6 @@ fn style_buttons(
             EditorAction::ToggleBackground => state.show_background,
             EditorAction::ToggleBorder => state.show_border,
             EditorAction::ToggleDebugUi => state.show_debug_ui,
-            EditorAction::ToggleTessellation => state.show_tessellation,
             EditorAction::SetColorInterpolation(interpolation) => {
                 state.mesh.color_interpolation() == interpolation
             }

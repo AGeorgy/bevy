@@ -23,7 +23,6 @@ struct MeshGradientStyle {
     radius_y: vec4<f32>,
     border: vec4<f32>,
     size: vec4<f32>,
-    tessellation: vec4<f32>,
     metadata: vec4<u32>,
 };
 
@@ -50,8 +49,6 @@ struct MeshVertexOutput {
     @location(1) @interpolate(flat) patch_index: vec2<u32>,
     @location(2) local_point: vec2<f32>,
     @location(3) world_point: vec2<f32>,
-    @if(MESH_WIREFRAME)
-    @location(4) @interpolate(flat) subdivisions: vec2<u32>,
     @builtin(position) position: vec4<f32>,
 };
 
@@ -315,8 +312,6 @@ fn vertex(
     out.patch_index = patch_index;
     out.local_point = local_point;
     out.world_point = world_point;
-@if(MESH_WIREFRAME)
-    out.subdivisions = subdivisions;
     return out;
 }
 
@@ -344,24 +339,6 @@ fn convert_to_linear_rgba(color: vec4<f32>) -> vec4<f32> {
 @else
     let rgb = color.xyz;
     return vec4(rgb, clamp(color.a, 0.0, 1.0));
-}
-
-@if(MESH_WIREFRAME)
-fn tessellation_wireframe(uv: vec2<f32>, subdivisions: vec2<u32>) -> f32 {
-    let grid = uv * vec2<f32>(subdivisions);
-    let cell = fract(grid);
-    let x_distance = min(cell.x, 1.0 - cell.x);
-    let y_distance = min(cell.y, 1.0 - cell.y);
-    let diagonal_distance = abs(cell.x - cell.y);
-    let width = mesh.tessellation.y;
-    let x_line = 1.0 - smoothstep(0.0, max(fwidth(grid.x) * width, 1e-6), x_distance);
-    let y_line = 1.0 - smoothstep(0.0, max(fwidth(grid.y) * width, 1e-6), y_distance);
-    let diagonal_line = 1.0 - smoothstep(
-        0.0,
-        max(fwidth(grid.x - grid.y) * width, 1e-6),
-        diagonal_distance,
-    );
-    return max(max(x_line, y_line), diagonal_line);
 }
 
 @fragment
@@ -400,9 +377,5 @@ fn fragment(in: MeshVertexOutput) -> @location(0) vec4<f32> {
     var color = interpolation_color;
 @else
     var color = convert_to_linear_rgba(interpolation_color);
-@if(MESH_WIREFRAME)
-    let wireframe = tessellation_wireframe(in.uv, in.subdivisions) * mesh.tessellation.z;
-@if(MESH_WIREFRAME)
-    color = vec4(mix(color.rgb, vec3(1.0), wireframe), color.a);
     return vec4(color.rgb, saturate(color.a * coverage));
 }
