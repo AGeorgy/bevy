@@ -48,7 +48,7 @@ struct EditorState {
 
 impl EditorState {
     fn new() -> Self {
-        let points = preset(DEFAULT_WIDTH, DEFAULT_HEIGHT);
+        let points = create_preset_points(DEFAULT_WIDTH, DEFAULT_HEIGHT);
         let mesh = MeshGradient::new_with_geometry(
             DEFAULT_WIDTH,
             DEFAULT_HEIGHT,
@@ -73,7 +73,7 @@ impl EditorState {
 
     fn replace_grid(&mut self, width: usize, height: usize) {
         let dimensions_changed = self.mesh.dimensions() != (width, height);
-        let points = preset(width, height);
+        let points = create_preset_points(width, height);
         match self.mesh.try_replace_grid(width, height, points.clone()) {
             Ok(()) => {
                 self.rest = points;
@@ -193,14 +193,14 @@ fn main() {
         .add_observer(select_point)
         .add_observer(drag_point)
         .add_observer(edit_channel)
-        .add_systems(Startup, setup)
+        .add_systems(Startup, initialize_editor)
         .add_systems(
             Update,
             (
-                keyboard,
-                animate,
+                handle_keyboard_input,
+                animate_control_points,
                 rebuild_editor,
-                responsive_layout,
+                update_responsive_layout,
                 sync_editor,
                 style_buttons,
             )
@@ -209,7 +209,7 @@ fn main() {
         .run();
 }
 
-fn preset(width: usize, height: usize) -> Vec<MeshGradientPoint> {
+fn create_preset_points(width: usize, height: usize) -> Vec<MeshGradientPoint> {
     const REFERENCE_COLORS: [[Color; DEFAULT_WIDTH]; DEFAULT_HEIGHT] = [
         [
             Color::srgb(0.02, 0.78, 0.72),
@@ -271,7 +271,7 @@ fn preset(width: usize, height: usize) -> Vec<MeshGradientPoint> {
         .collect()
 }
 
-fn setup(mut commands: Commands, mut state: ResMut<EditorState>) {
+fn initialize_editor(mut commands: Commands, mut state: ResMut<EditorState>) {
     commands.spawn(Camera2d);
     spawn_editor(&mut commands, &state);
     state.rebuild = false;
@@ -342,8 +342,8 @@ fn spawn_editor(commands: &mut Commands, state: &EditorState) {
                     },
                 ))
                 .with_children(|previews| {
-                    preview_column(previews, state, PreviewKind::Background);
-                    preview_column(previews, state, PreviewKind::Border);
+                    spawn_preview_column(previews, state, PreviewKind::Background);
+                    spawn_preview_column(previews, state, PreviewKind::Border);
                 });
 
             parent
@@ -364,7 +364,7 @@ fn spawn_editor(commands: &mut Commands, state: &EditorState) {
         });
 }
 
-fn preview_column(parent: &mut ChildSpawnerCommands, state: &EditorState, kind: PreviewKind) {
+fn spawn_preview_column(parent: &mut ChildSpawnerCommands, state: &EditorState, kind: PreviewKind) {
     let (title, editable) = match kind {
         PreviewKind::Background => ("BACKGROUND / EDITABLE", true),
         PreviewKind::Border => ("BORDER / SYNCHRONIZED", false),
@@ -440,7 +440,11 @@ fn spawn_preview(
                 }
             }
             for (index, point) in state.mesh.points().iter().enumerate() {
-                preview.spawn(control_point(index, point, index == state.selected));
+                preview.spawn(create_control_point_handle(
+                    index,
+                    point,
+                    index == state.selected,
+                ));
             }
         }
     });
@@ -464,7 +468,11 @@ fn spawn_control_edge(parent: &mut ChildSpawnerCommands, from: usize, to: usize)
     }
 }
 
-fn control_point(index: usize, point: &MeshGradientPoint, selected: bool) -> impl Bundle {
+fn create_control_point_handle(
+    index: usize,
+    point: &MeshGradientPoint,
+    selected: bool,
+) -> impl Bundle {
     let diameter = if selected { 22.0 } else { 17.0 };
     (
         ControlPoint(index),
@@ -504,21 +512,21 @@ fn spawn_inspector(parent: &mut ChildSpawnerCommands, state: &EditorState) {
             ..default()
         },
         children![
-            section_label("GRID + PLAYBACK"),
+            create_section_label("GRID + PLAYBACK"),
             (
-                button_row(),
+                create_button_row(),
                 children![
-                    button("5x4", EditorAction::Grid(5, 4)),
-                    button("2x2", EditorAction::Grid(2, 2)),
-                    button("3x3", EditorAction::Grid(3, 3)),
-                    button("4x4", EditorAction::Grid(4, 4)),
+                    create_action_button("5x4", EditorAction::Grid(5, 4)),
+                    create_action_button("2x2", EditorAction::Grid(2, 2)),
+                    create_action_button("3x3", EditorAction::Grid(3, 3)),
+                    create_action_button("4x4", EditorAction::Grid(4, 4)),
                 ]
             ),
             (
-                button_row(),
+                create_button_row(),
                 children![
-                    button("Reset", EditorAction::Reset),
-                    button(
+                    create_action_button("Reset", EditorAction::Reset),
+                    create_action_button(
                         if state.animate { "Pause" } else { "Animate" },
                         EditorAction::ToggleAnimation,
                     ),
@@ -537,7 +545,7 @@ fn spawn_inspector(parent: &mut ChildSpawnerCommands, state: &EditorState) {
             ..default()
         },
         children![
-            section_label("SELECTED POINT / RGBA"),
+            create_section_label("SELECTED POINT / RGBA"),
             (
                 Node {
                     flex_direction: FlexDirection::Row,
@@ -566,10 +574,10 @@ fn spawn_inspector(parent: &mut ChildSpawnerCommands, state: &EditorState) {
                             ..default()
                         },
                         children![
-                            channel(0, rgba[0]),
-                            channel(1, rgba[1]),
-                            channel(2, rgba[2]),
-                            channel(3, rgba[3]),
+                            create_channel_slider(0, rgba[0]),
+                            create_channel_slider(1, rgba[1]),
+                            create_channel_slider(2, rgba[2]),
+                            create_channel_slider(3, rgba[3]),
                         ]
                     ),
                 ]
@@ -587,17 +595,17 @@ fn spawn_inspector(parent: &mut ChildSpawnerCommands, state: &EditorState) {
             ..default()
         },
         children![
-            section_label("COLOR + PREVIEWS + DEBUG"),
+            create_section_label("COLOR + PREVIEWS + DEBUG"),
             (
-                button_row(),
+                create_button_row(),
                 children![
-                    button(
+                    create_action_button(
                         "Vertex",
                         EditorAction::SetColorInterpolation(
                             MeshGradientColorInterpolation::Vertex,
                         ),
                     ),
-                    button(
+                    create_action_button(
                         "Bicubic",
                         EditorAction::SetColorInterpolation(
                             MeshGradientColorInterpolation::Bicubic,
@@ -606,40 +614,40 @@ fn spawn_inspector(parent: &mut ChildSpawnerCommands, state: &EditorState) {
                 ]
             ),
             (
-                button_row(),
+                create_button_row(),
                 children![
-                    button(
+                    create_action_button(
                         "Linear",
                         EditorAction::SetColorSpace(MeshGradientColorSpace::LinearRgba),
                     ),
-                    button(
+                    create_action_button(
                         "sRGB",
                         EditorAction::SetColorSpace(MeshGradientColorSpace::Srgba),
                     ),
-                    button(
+                    create_action_button(
                         "OKLab",
                         EditorAction::SetColorSpace(MeshGradientColorSpace::Oklaba),
                     ),
-                    button("OKLCH", EditorAction::SetColorSpace(MeshGradientColorSpace::Oklcha)),
-                    button("OKLCH Long", EditorAction::SetColorSpace(MeshGradientColorSpace::OklchaLong)),
-                    button("HSL", EditorAction::SetColorSpace(MeshGradientColorSpace::Hsla)),
-                    button("HSL Long", EditorAction::SetColorSpace(MeshGradientColorSpace::HslaLong)),
-                    button("HSV", EditorAction::SetColorSpace(MeshGradientColorSpace::Hsva)),
-                    button("HSV Long", EditorAction::SetColorSpace(MeshGradientColorSpace::HsvaLong)),
-                    button("OKHSL", EditorAction::SetColorSpace(MeshGradientColorSpace::Okhsla)),
-                    button("OKHSL Long", EditorAction::SetColorSpace(MeshGradientColorSpace::OkhslaLong)),
+                    create_action_button("OKLCH", EditorAction::SetColorSpace(MeshGradientColorSpace::Oklcha)),
+                    create_action_button("OKLCH Long", EditorAction::SetColorSpace(MeshGradientColorSpace::OklchaLong)),
+                    create_action_button("HSL", EditorAction::SetColorSpace(MeshGradientColorSpace::Hsla)),
+                    create_action_button("HSL Long", EditorAction::SetColorSpace(MeshGradientColorSpace::HslaLong)),
+                    create_action_button("HSV", EditorAction::SetColorSpace(MeshGradientColorSpace::Hsva)),
+                    create_action_button("HSV Long", EditorAction::SetColorSpace(MeshGradientColorSpace::HsvaLong)),
+                    create_action_button("OKHSL", EditorAction::SetColorSpace(MeshGradientColorSpace::Okhsla)),
+                    create_action_button("OKHSL Long", EditorAction::SetColorSpace(MeshGradientColorSpace::OkhslaLong)),
                 ]
             ),
             (
-                button_row(),
+                create_button_row(),
                 children![
-                    button("Background", EditorAction::ToggleBackground),
-                    button("Border", EditorAction::ToggleBorder),
+                    create_action_button("Background", EditorAction::ToggleBackground),
+                    create_action_button("Border", EditorAction::ToggleBorder),
                 ]
             ),
             (
-                button_row(),
-                children![button("Debug UI", EditorAction::ToggleDebugUi)]
+                create_button_row(),
+                children![create_action_button("Debug UI", EditorAction::ToggleDebugUi)]
             ),
             (
                 StateReadout,
@@ -656,7 +664,7 @@ fn spawn_inspector(parent: &mut ChildSpawnerCommands, state: &EditorState) {
     ));
 }
 
-fn section_label(label: &'static str) -> impl Bundle {
+fn create_section_label(label: &'static str) -> impl Bundle {
     (
         Text::new(label),
         TextFont::from_font_size(12.0),
@@ -664,7 +672,7 @@ fn section_label(label: &'static str) -> impl Bundle {
     )
 }
 
-fn button_row() -> Node {
+fn create_button_row() -> Node {
     Node {
         flex_direction: FlexDirection::Row,
         flex_wrap: FlexWrap::Wrap,
@@ -674,7 +682,7 @@ fn button_row() -> Node {
     }
 }
 
-fn button(label: &'static str, action: EditorAction) -> impl Bundle {
+fn create_action_button(label: &'static str, action: EditorAction) -> impl Bundle {
     (
         action,
         Button,
@@ -700,7 +708,7 @@ fn button(label: &'static str, action: EditorAction) -> impl Bundle {
     )
 }
 
-fn channel(index: usize, value: f32) -> impl Bundle {
+fn create_channel_slider(index: usize, value: f32) -> impl Bundle {
     let label = ["R", "G", "B", "A"][index];
     (
         Node {
@@ -867,7 +875,7 @@ fn edit_channel(
     );
 }
 
-fn keyboard(keys: Res<ButtonInput<KeyCode>>, mut state: ResMut<EditorState>) {
+fn handle_keyboard_input(keys: Res<ButtonInput<KeyCode>>, mut state: ResMut<EditorState>) {
     for (key, size) in [
         (KeyCode::Digit2, 2),
         (KeyCode::Digit3, 3),
@@ -893,7 +901,7 @@ fn keyboard(keys: Res<ButtonInput<KeyCode>>, mut state: ResMut<EditorState>) {
     }
 }
 
-fn animate(time: Res<Time>, mut state: ResMut<EditorState>) {
+fn animate_control_points(time: Res<Time>, mut state: ResMut<EditorState>) {
     if !state.animate {
         return;
     }
@@ -912,7 +920,7 @@ fn animate(time: Res<Time>, mut state: ResMut<EditorState>) {
     }
 }
 
-fn responsive_layout(
+fn update_responsive_layout(
     windows: Query<Ref<Window>, With<PrimaryWindow>>,
     mut roots: Query<
         &mut Node,

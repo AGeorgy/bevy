@@ -155,7 +155,7 @@ fn setup(mut commands: Commands, args: Res<Args>) {
                             height: px(MESH_NODE_SIZE),
                             ..default()
                         },
-                        BackgroundGradient::from(mesh_gradient(i)),
+                        BackgroundGradient::from(create_mesh_gradient(i)),
                         GradientNode { index: i },
                     ));
                     continue;
@@ -279,7 +279,7 @@ fn animate_gradients(
     }
 }
 
-fn mesh_gradient(index: usize) -> MeshGradient {
+fn create_mesh_gradient(index: usize) -> MeshGradient {
     let points = (0..16)
         .map(|point| {
             let column = point % 4;
@@ -334,13 +334,13 @@ fn collect_benchmark(
         return;
     }
 
-    let (total_median, total_p95) = median_and_p95(&mut samples.total_ms);
-    let (update_median, update_p95) = median_and_p95(&mut samples.update_cpu_ms);
-    let (ui_cpu_median, ui_cpu_p95) = median_and_p95(&mut samples.ui_cpu_ms);
+    let (total_median, total_p95) = compute_latency_percentiles(&mut samples.total_ms);
+    let (update_median, update_p95) = compute_latency_percentiles(&mut samples.update_cpu_ms);
+    let (ui_cpu_median, ui_cpu_p95) = compute_latency_percentiles(&mut samples.ui_cpu_ms);
     let gpu = if samples.ui_gpu_ms.is_empty() {
         "unavailable on this backend".to_string()
     } else {
-        let (median, p95) = median_and_p95(&mut samples.ui_gpu_ms);
+        let (median, p95) = compute_latency_percentiles(&mut samples.ui_gpu_ms);
         format!("median={median:.3}ms p95={p95:.3}ms")
     };
     let window = windows.single().ok();
@@ -358,7 +358,7 @@ fn collect_benchmark(
     exit.write(AppExit::Success);
 }
 
-fn median_and_p95(samples: &mut [f64]) -> (f64, f64) {
+fn compute_latency_percentiles(samples: &mut [f64]) -> (f64, f64) {
     if samples.is_empty() {
         return (f64::NAN, f64::NAN);
     }

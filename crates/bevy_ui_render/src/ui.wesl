@@ -188,7 +188,7 @@ fn antialias(distance: f32) -> f32 {
     return saturate(0.5 - distance);
 }
 
-fn uinode_border_coverage(
+fn compute_uinode_border_coverage(
     point: vec2<f32>,
     size: vec2<f32>,
     radius_x: vec4<f32>,
@@ -238,12 +238,12 @@ fn draw_uinode_border(
     border: vec4<f32>,
     flags: u32,
 ) -> vec4<f32> {
-    let coverage = uinode_border_coverage(point, size, radius_x, radius_y, border, flags);
+    let coverage = compute_uinode_border_coverage(point, size, radius_x, radius_y, border, flags);
     // Blend mode ALPHA_BLENDING is used for UI elements, so we don't premultiply alpha here.
     return vec4(color.rgb, saturate(color.a * coverage));
 }
 
-fn uinode_background_coverage(
+fn compute_uinode_background_coverage(
     point: vec2<f32>,
     size: vec2<f32>,
     radius_x: vec4<f32>,
@@ -271,7 +271,7 @@ fn draw_uinode_background(
     border: vec4<f32>,
     flags: u32,
 ) -> vec4<f32> {
-    let coverage = uinode_background_coverage(point, size, radius_x, radius_y, border, flags);
+    let coverage = compute_uinode_background_coverage(point, size, radius_x, radius_y, border, flags);
     return vec4(color.rgb, saturate(color.a * coverage));
 }
 

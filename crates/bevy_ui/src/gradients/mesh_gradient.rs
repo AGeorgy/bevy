@@ -612,14 +612,14 @@ impl MeshGradient {
             if !point.position.is_finite() {
                 return Err(MeshGradientError::NonFinitePosition { point: index });
             }
-            let raw = raw_color_components(point.color);
+            let raw = read_color_components(point.color);
             if raw.iter().any(|component| !component.is_finite()) {
                 return Err(MeshGradientError::NonFiniteColor { point: index });
             }
             if !(0.0..=1.0).contains(&point.color.alpha()) {
                 return Err(MeshGradientError::AlphaOutOfRange { point: index });
             }
-            let color = interpolation_components(point.color, color_space);
+            let color = convert_color_to_interpolation_components(point.color, color_space);
             if color.iter().any(|component| !component.is_finite()) {
                 return Err(MeshGradientError::NonFiniteColor { point: index });
             }
@@ -638,7 +638,7 @@ impl MeshGradient {
                 if geometry == MeshGradientGeometry::NonFolding {
                     validate_cell_corners(width, &values, column, row)?;
                 }
-                let controls = patch_controls(width, height, &values, column, row);
+                let controls = build_patch_controls(width, height, &values, column, row);
                 if controls.iter().flatten().any(|component| {
                     !component.lo.is_finite()
                         || !component.hi.is_finite()
@@ -656,7 +656,7 @@ impl MeshGradient {
     }
 }
 
-fn raw_color_components(color: Color) -> [f32; 4] {
+fn read_color_components(color: Color) -> [f32; 4] {
     match color {
         Color::Srgba(color) => color.to_f32_array(),
         Color::LinearRgba(color) => color.to_f32_array(),
@@ -674,7 +674,10 @@ fn raw_color_components(color: Color) -> [f32; 4] {
     }
 }
 
-fn interpolation_components(color: Color, color_space: MeshGradientColorSpace) -> [f32; 4] {
+fn convert_color_to_interpolation_components(
+    color: Color,
+    color_space: MeshGradientColorSpace,
+) -> [f32; 4] {
     match color_space {
         MeshGradientColorSpace::Oklaba => Oklaba::from(color).to_f32_array(),
         MeshGradientColorSpace::Srgba => Srgba::from(color).to_f32_array(),
@@ -749,7 +752,7 @@ struct Interval {
 }
 
 impl Interval {
-    fn exact(value: f64) -> Self {
+    fn from_exact_value(value: f64) -> Self {
         Self {
             lo: value,
             hi: value,
@@ -824,7 +827,7 @@ fn scale_control(control: Control, factor: f64) -> Control {
     control.map(|component| component.scale(factor))
 }
 
-fn catmull_rom_to_bezier(points: [Control; 4]) -> [Control; 4] {
+fn convert_catmull_rom_to_bezier(points: [Control; 4]) -> [Control; 4] {
     [
         points[1],
         add_controls(
@@ -839,7 +842,7 @@ fn catmull_rom_to_bezier(points: [Control; 4]) -> [Control; 4] {
     ]
 }
 
-fn patch_controls(
+fn build_patch_controls(
     width: usize,
     height: usize,
     points: &[[f64; 6]],
@@ -847,8 +850,8 @@ fn patch_controls(
     row: usize,
 ) -> [Control; 16] {
     let rows: [[Control; 4]; 4] = core::array::from_fn(|y| {
-        catmull_rom_to_bezier(core::array::from_fn(|x| {
-            extended_point(
+        convert_catmull_rom_to_bezier(core::array::from_fn(|x| {
+            sample_extended_point(
                 width,
                 height,
                 points,
@@ -857,19 +860,20 @@ fn patch_controls(
             )
         }))
     });
-    let columns: [[Control; 4]; 4] =
-        core::array::from_fn(|x| catmull_rom_to_bezier(core::array::from_fn(|y| rows[y][x])));
+    let columns: [[Control; 4]; 4] = core::array::from_fn(|x| {
+        convert_catmull_rom_to_bezier(core::array::from_fn(|y| rows[y][x]))
+    });
     core::array::from_fn(|index| columns[index % 4][index / 4])
 }
 
-fn extended_point(
+fn sample_extended_point(
     width: usize,
     height: usize,
     points: &[[f64; 6]],
     column: i64,
     row: i64,
 ) -> Control {
-    fn weighted_indices(index: i64, length: usize) -> [(usize, f64); 2] {
+    fn compute_extrapolation_weights(index: i64, length: usize) -> [(usize, f64); 2] {
         if index < 0 {
             [(0, 2.0), (1, -1.0)]
         } else if index >= length as i64 {
@@ -879,12 +883,12 @@ fn extended_point(
         }
     }
 
-    let mut result = [Interval::exact(0.0); 6];
-    for (y, y_weight) in weighted_indices(row, height) {
-        for (x, x_weight) in weighted_indices(column, width) {
+    let mut result = [Interval::from_exact_value(0.0); 6];
+    for (y, y_weight) in compute_extrapolation_weights(row, height) {
+        for (x, x_weight) in compute_extrapolation_weights(column, width) {
             let weight = x_weight * y_weight;
             if weight != 0.0 {
-                let point = points[y * width + x].map(Interval::exact);
+                let point = points[y * width + x].map(Interval::from_exact_value);
                 result = add_controls(result, scale_control(point, weight));
             }
         }
@@ -997,7 +1001,7 @@ mod tests {
     use bevy_reflect::{PartialReflect, ReflectRef};
     use proptest::{collection, prelude::*};
 
-    fn regular_grid(width: usize, height: usize) -> Vec<MeshGradientPoint> {
+    fn create_regular_grid(width: usize, height: usize) -> Vec<MeshGradientPoint> {
         (0..height)
             .flat_map(|row| {
                 (0..width).map(move |column| {
@@ -1009,21 +1013,21 @@ mod tests {
             .collect()
     }
 
-    fn regular_mesh(width: usize, height: usize) -> MeshGradient {
+    fn create_regular_mesh(width: usize, height: usize) -> MeshGradient {
         MeshGradient::new_in_color_space(
             width,
             height,
-            regular_grid(width, height),
+            create_regular_grid(width, height),
             MeshGradientColorSpace::LinearRgba,
         )
         .unwrap()
     }
 
-    fn point_bits(mesh: &MeshGradient) -> Vec<[u32; 6]> {
+    fn read_point_bits(mesh: &MeshGradient) -> Vec<[u32; 6]> {
         mesh.points()
             .iter()
             .map(|point| {
-                let color = raw_color_components(point.color);
+                let color = read_color_components(point.color);
                 [
                     point.position.x.to_bits(),
                     point.position.y.to_bits(),
@@ -1038,7 +1042,7 @@ mod tests {
 
     #[test]
     fn defaults_to_the_mobile_friendly_color_path() {
-        let mesh = MeshGradient::new(2, 2, regular_grid(2, 2)).unwrap();
+        let mesh = MeshGradient::new(2, 2, create_regular_grid(2, 2)).unwrap();
 
         assert_eq!(mesh.color_space(), MeshGradientColorSpace::LinearRgba);
         assert_eq!(
@@ -1051,7 +1055,7 @@ mod tests {
     fn accepts_every_supported_regular_dimension() {
         for width in MIN_MESH_GRADIENT_DIMENSION..=MAX_MESH_GRADIENT_DIMENSION {
             for height in MIN_MESH_GRADIENT_DIMENSION..=MAX_MESH_GRADIENT_DIMENSION {
-                let mesh = regular_mesh(width, height);
+                let mesh = create_regular_mesh(width, height);
                 assert_eq!(mesh.dimensions(), (width, height));
                 assert_eq!(mesh.points().len(), width * height);
             }
@@ -1061,7 +1065,7 @@ mod tests {
     #[test]
     fn dimensions_and_cardinality_are_checked() {
         assert!(matches!(
-            MeshGradient::new(1, 2, regular_grid(2, 2)),
+            MeshGradient::new(1, 2, create_regular_grid(2, 2)),
             Err(MeshGradientError::DimensionsTooSmall { .. })
         ));
         assert!(matches!(
@@ -1073,7 +1077,7 @@ mod tests {
             Err(MeshGradientError::CapacityExceeded { .. })
         ));
         assert!(matches!(
-            MeshGradient::new(2, 2, regular_grid(2, 2)[..3].to_vec()),
+            MeshGradient::new(2, 2, create_regular_grid(2, 2)[..3].to_vec()),
             Err(MeshGradientError::PointCount {
                 expected: 4,
                 actual: 3
@@ -1083,21 +1087,21 @@ mod tests {
 
     #[test]
     fn validates_input_and_derived_numeric_values() {
-        let mut points = regular_grid(2, 2);
+        let mut points = create_regular_grid(2, 2);
         points[0].position.x = f32::NAN;
         assert!(matches!(
             MeshGradient::new(2, 2, points),
             Err(MeshGradientError::NonFinitePosition { point: 0 })
         ));
 
-        let mut points = regular_grid(2, 2);
+        let mut points = create_regular_grid(2, 2);
         points[0].color = Color::linear_rgba(f32::NAN, 0.0, 0.0, 1.0);
         assert!(matches!(
             MeshGradient::new_in_color_space(2, 2, points, MeshGradientColorSpace::LinearRgba),
             Err(MeshGradientError::NonFiniteColor { point: 0 })
         ));
 
-        let mut points = regular_grid(2, 2);
+        let mut points = create_regular_grid(2, 2);
         points[0].color = Color::linear_rgba(0.0, 0.0, 0.0, 1.1);
         assert!(matches!(
             MeshGradient::new_in_color_space(2, 2, points, MeshGradientColorSpace::LinearRgba),
@@ -1107,7 +1111,7 @@ mod tests {
 
     #[test]
     fn accepts_outside_coordinates_and_hdr_colors() {
-        let points = regular_grid(2, 2)
+        let points = create_regular_grid(2, 2)
             .into_iter()
             .map(|mut point| {
                 point.position = point.position * 3.0 - Vec2::splat(1.0);
@@ -1120,7 +1124,7 @@ mod tests {
                 .unwrap();
         assert_eq!(mesh.point_at(0, 0).unwrap().position, Vec2::splat(-1.0));
 
-        let mut unrepresentable = regular_grid(2, 2);
+        let mut unrepresentable = create_regular_grid(2, 2);
         unrepresentable[0].color = Color::linear_rgba(f32::MAX, 0.0, 0.0, 1.0);
         assert!(matches!(
             MeshGradient::new_in_color_space(
@@ -1135,7 +1139,7 @@ mod tests {
 
     #[test]
     fn rejects_degenerate_folded_and_curved_folded_surfaces() {
-        let mut degenerate = regular_grid(2, 2);
+        let mut degenerate = create_regular_grid(2, 2);
         degenerate[2].position = degenerate[0].position;
         degenerate[3].position = degenerate[1].position;
         assert!(matches!(
@@ -1143,7 +1147,7 @@ mod tests {
             Err(MeshGradientError::DegenerateGeometry { .. })
         ));
 
-        let rotated = regular_grid(3, 3)
+        let rotated = create_regular_grid(3, 3)
             .into_iter()
             .map(|mut point| {
                 point.position = Vec2::ONE - point.position;
@@ -1155,7 +1159,7 @@ mod tests {
             Err(MeshGradientError::UncertifiedGeometry { .. })
         ));
 
-        let mut curved_fold = regular_grid(3, 3);
+        let mut curved_fold = create_regular_grid(3, 3);
         for point in &mut curved_fold {
             if point.position.x == 0.5 {
                 point.position.x = 0.01;
@@ -1169,7 +1173,7 @@ mod tests {
 
     #[test]
     fn fold_enabled_geometry_accepts_editor_drag_rejected_by_non_folding_policy() {
-        let mut points = regular_grid(5, 4);
+        let mut points = create_regular_grid(5, 4);
         points[7].position.x = 0.589;
 
         assert!(matches!(
@@ -1189,7 +1193,7 @@ mod tests {
 
     #[test]
     fn fold_enabled_geometry_accepts_collapsed_and_crossing_points() {
-        let mut points = regular_grid(3, 3);
+        let mut points = create_regular_grid(3, 3);
         points[4].position = points[5].position;
         points[7].position = Vec2::new(1.25, -0.25);
 
@@ -1209,7 +1213,7 @@ mod tests {
 
     #[test]
     fn color_interpolation_defaults_to_vertex_and_survives_checked_edits() {
-        let mut mesh = regular_mesh(3, 3);
+        let mut mesh = create_regular_mesh(3, 3);
         assert_eq!(
             mesh.color_interpolation(),
             MeshGradientColorInterpolation::Vertex
@@ -1226,7 +1230,7 @@ mod tests {
     fn rejects_distant_surface_overlap() {
         let width = 10;
         let height = 2;
-        let mut points = regular_grid(width, height);
+        let mut points = create_regular_grid(width, height);
         for row in 0..height {
             let radius = 1.0 + row as f32 * 0.25;
             for column in 0..width {
@@ -1239,8 +1243,10 @@ mod tests {
         let values: Vec<_> = points
             .iter()
             .map(|point| {
-                let color =
-                    interpolation_components(point.color, MeshGradientColorSpace::LinearRgba);
+                let color = convert_color_to_interpolation_components(
+                    point.color,
+                    MeshGradientColorSpace::LinearRgba,
+                );
                 [
                     point.position.x as f64,
                     point.position.y as f64,
@@ -1268,15 +1274,15 @@ mod tests {
 
     #[test]
     fn rejected_edits_preserve_every_stored_bit() {
-        let mut mesh = regular_mesh(3, 3);
+        let mut mesh = create_regular_mesh(3, 3);
         let dimensions = mesh.dimensions();
         let color_space = mesh.color_space();
-        let before = point_bits(&mesh);
+        let before = read_point_bits(&mesh);
 
         assert!(mesh.try_set_position(4, Vec2::new(1.2, 0.5)).is_err());
         assert_eq!(mesh.dimensions(), dimensions);
         assert_eq!(mesh.color_space(), color_space);
-        assert_eq!(point_bits(&mesh), before);
+        assert_eq!(read_point_bits(&mesh), before);
 
         assert!(mesh
             .try_edit_points(|points| {
@@ -1285,13 +1291,13 @@ mod tests {
                 Ok(())
             })
             .is_err());
-        assert_eq!(point_bits(&mesh), before);
+        assert_eq!(read_point_bits(&mesh), before);
 
         assert!(matches!(
             mesh.try_set_color(mesh.points().len(), Color::WHITE),
             Err(MeshGradientError::PointIndexOutOfBounds { .. })
         ));
-        assert_eq!(point_bits(&mesh), before);
+        assert_eq!(read_point_bits(&mesh), before);
 
         assert!(mesh
             .try_set_point(
@@ -1299,27 +1305,29 @@ mod tests {
                 MeshGradientPoint::new(Vec2::new(f32::NAN, 0.0), Color::WHITE)
             )
             .is_err());
-        assert_eq!(point_bits(&mesh), before);
+        assert_eq!(read_point_bits(&mesh), before);
 
         assert!(mesh
             .try_set_color(0, Color::linear_rgba(0.0, 0.0, 0.0, 2.0))
             .is_err());
-        assert_eq!(point_bits(&mesh), before);
+        assert_eq!(read_point_bits(&mesh), before);
 
         let mut incomplete = mesh.points().to_vec();
         incomplete.pop();
         assert!(mesh.try_replace_points(incomplete).is_err());
-        assert_eq!(point_bits(&mesh), before);
+        assert_eq!(read_point_bits(&mesh), before);
 
-        assert!(mesh.try_replace_grid(1, 2, regular_grid(2, 2)).is_err());
+        assert!(mesh
+            .try_replace_grid(1, 2, create_regular_grid(2, 2))
+            .is_err());
         assert_eq!(mesh.dimensions(), dimensions);
         assert_eq!(mesh.color_space(), color_space);
-        assert_eq!(point_bits(&mesh), before);
+        assert_eq!(read_point_bits(&mesh), before);
     }
 
     #[test]
     fn batch_edits_validate_only_the_complete_candidate() {
-        let mut mesh = regular_mesh(3, 3);
+        let mut mesh = create_regular_mesh(3, 3);
         mesh.try_edit_points(|points| {
             points.swap(3, 4);
             points.swap(4, 3);
@@ -1334,10 +1342,13 @@ mod tests {
     fn shared_patch_controls_are_identical() {
         let width = 3;
         let height = 3;
-        let points = regular_grid(width, height);
+        let points = create_regular_grid(width, height);
         let mut values = Vec::new();
         for point in points {
-            let color = interpolation_components(point.color, MeshGradientColorSpace::LinearRgba);
+            let color = convert_color_to_interpolation_components(
+                point.color,
+                MeshGradientColorSpace::LinearRgba,
+            );
             values.push([
                 point.position.x as f64,
                 point.position.y as f64,
@@ -1347,8 +1358,8 @@ mod tests {
                 color[3] as f64,
             ]);
         }
-        let left = patch_controls(width, height, &values, 0, 0);
-        let right = patch_controls(width, height, &values, 1, 0);
+        let left = build_patch_controls(width, height, &values, 0, 0);
+        let right = build_patch_controls(width, height, &values, 1, 0);
         for row in 0..4 {
             for component in 0..6 {
                 assert_eq!(
@@ -1380,7 +1391,7 @@ mod tests {
         ] {
             let mesh_space = MeshGradientColorSpace::from(space);
             assert_eq!(InterpolationColorSpace::from(mesh_space), space);
-            let mut mesh = regular_mesh(2, 2);
+            let mut mesh = create_regular_mesh(2, 2);
             mesh.try_set_color_space(mesh_space).unwrap();
             assert_eq!(mesh.color_space(), mesh_space);
             #[cfg(feature = "serialize")]
@@ -1388,24 +1399,25 @@ mod tests {
                 let encoded = ron::to_string(&mesh).unwrap();
                 assert_eq!(ron::from_str::<MeshGradient>(&encoded).unwrap(), mesh);
             }
-            assert!(
-                interpolation_components(Color::hsva(350.0, 0.7, 0.8, 0.5), mesh_space)
-                    .iter()
-                    .all(|component| component.is_finite())
-            );
+            assert!(convert_color_to_interpolation_components(
+                Color::hsva(350.0, 0.7, 0.8, 0.5),
+                mesh_space
+            )
+            .iter()
+            .all(|component| component.is_finite()));
         }
     }
 
     #[test]
     fn reflection_is_opaque() {
-        let mesh = regular_mesh(2, 2);
+        let mesh = create_regular_mesh(2, 2);
         assert!(matches!(mesh.reflect_ref(), ReflectRef::Opaque(_)));
     }
 
     #[cfg(feature = "serialize")]
     #[test]
     fn serialization_round_trips_and_revalidates() {
-        let mut points = regular_grid(3, 3);
+        let mut points = create_regular_grid(3, 3);
         points[4].position = points[5].position;
         let mesh = MeshGradient::new_with_geometry(
             3,
@@ -1423,7 +1435,7 @@ mod tests {
         let malformed = SerializedMeshGradient {
             width: 1,
             height: 2,
-            points: regular_grid(2, 2),
+            points: create_regular_grid(2, 2),
             color_space: MeshGradientColorSpace::LinearRgba,
             color_interpolation: MeshGradientColorInterpolation::Vertex,
             geometry: MeshGradientGeometry::NonFolding,
@@ -1473,9 +1485,9 @@ mod tests {
         fn arbitrary_edit_sequences_preserve_the_invariant(
             edits in collection::vec((0usize..16, -8i16..8, -8i16..8), 0..64),
         ) {
-            let mut mesh = regular_mesh(4, 4);
+            let mut mesh = create_regular_mesh(4, 4);
             for (index, x_offset, y_offset) in edits {
-                let before = point_bits(&mesh);
+                let before = read_point_bits(&mesh);
                 let result = mesh.try_edit_points(|points| {
                     points[index].position += Vec2::new(
                         x_offset as f32 / 100.0,
@@ -1484,7 +1496,7 @@ mod tests {
                     Ok(())
                 });
                 if result.is_err() {
-                    prop_assert_eq!(point_bits(&mesh), before);
+                    prop_assert_eq!(read_point_bits(&mesh), before);
                 } else {
                     prop_assert!(MeshGradient::validate(
                         mesh.width,

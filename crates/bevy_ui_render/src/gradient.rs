@@ -7,8 +7,8 @@ use core::{
 use super::shader_flags::BORDER_ALL;
 use crate::clipping::clip_polygon;
 use crate::mesh_gradient::{
-    interpolation_color, physical_axes, ParameterVertex, QualityState, SurfaceBounds,
-    TopologyCache, TopologyKey,
+    compute_physical_axes, convert_mesh_color_for_interpolation, ParameterVertex, QualityState,
+    SurfaceBounds, TopologyCache, TopologyKey,
 };
 use crate::*;
 use bevy_asset::*;
@@ -194,7 +194,7 @@ pub struct UiGradientPipelineKey {
     pub target_format: TextureFormat,
 }
 
-fn mesh_gradient_primitive_state(cull_folds: bool, flipped: bool) -> PrimitiveState {
+fn build_mesh_gradient_primitive_state(cull_folds: bool, flipped: bool) -> PrimitiveState {
     PrimitiveState {
         // Parameter triangles are clockwise after the UI coordinate system's
         // downward Y axis is projected to the render target. A mirrored node
@@ -209,7 +209,7 @@ fn mesh_gradient_primitive_state(cull_folds: bool, flipped: bool) -> PrimitiveSt
     }
 }
 
-fn gradient_shader_defs(key: UiGradientPipelineKey) -> Vec<ShaderDefVal> {
+fn build_gradient_shader_defs(key: UiGradientPipelineKey) -> Vec<ShaderDefVal> {
     let color_space = match key.color_space {
         InterpolationColorSpace::Oklaba => "IN_OKLAB",
         InterpolationColorSpace::Oklcha => "IN_OKLCH",
@@ -302,7 +302,7 @@ impl SpecializedRenderPipeline for GradientPipeline {
                 ],
             )
         };
-        let shader_defs = gradient_shader_defs(key);
+        let shader_defs = build_gradient_shader_defs(key);
 
         let shader = if key.mesh {
             self.mesh_shader.clone()
@@ -343,7 +343,7 @@ impl SpecializedRenderPipeline for GradientPipeline {
             } else {
                 "ui_gradient_pipeline".into()
             }),
-            primitive: mesh_gradient_primitive_state(key.mesh_cull_folds, key.mesh_flipped),
+            primitive: build_mesh_gradient_primitive_state(key.mesh_cull_folds, key.mesh_flipped),
             ..default()
         }
     }
@@ -378,7 +378,7 @@ pub(crate) struct MeshGradientSurfaceCache {
 impl MeshGradientSurfaceCache {
     fn get(&mut self, id: MeshGradientId, mesh: &MeshGradient) -> Arc<SurfaceBounds> {
         if let Some((cached_mesh, bounds)) = self.entries.get(&id)
-            && surface_bounds_inputs_match(cached_mesh, mesh)
+            && have_matching_surface_bounds_inputs(cached_mesh, mesh)
         {
             return Arc::clone(bounds);
         }
@@ -393,7 +393,7 @@ impl MeshGradientSurfaceCache {
     }
 }
 
-fn surface_bounds_inputs_match(left: &MeshGradient, right: &MeshGradient) -> bool {
+fn have_matching_surface_bounds_inputs(left: &MeshGradient, right: &MeshGradient) -> bool {
     let uses_vertex_colors = |mesh: &MeshGradient| {
         mesh.color_interpolation() == MeshGradientColorInterpolation::Vertex
             && !mesh.color_space().is_hue_based()
@@ -1492,18 +1492,18 @@ enum MeshUniformError {
     Invalid,
 }
 
-fn affine_is_finite(transform: Affine2) -> bool {
+fn is_affine_transform_finite(transform: Affine2) -> bool {
     transform.matrix2.x_axis.is_finite()
         && transform.matrix2.y_axis.is_finite()
         && transform.translation.is_finite()
 }
 
-fn mesh_gradient_points_uniform(mesh: &MeshGradient) -> MeshGradientPointsUniform {
+fn build_mesh_gradient_points_uniform(mesh: &MeshGradient) -> MeshGradientPointsUniform {
     let mut positions = [Vec4::ZERO; MAX_MESH_GRADIENT_POINTS];
     let mut colors = [Vec4::ZERO; MAX_MESH_GRADIENT_POINTS];
     for (index, point) in mesh.points().iter().enumerate() {
         positions[index] = point.position.extend(0.0).extend(0.0);
-        colors[index] = Vec4::from_array(interpolation_color(mesh, point.color));
+        colors[index] = Vec4::from_array(convert_mesh_color_for_interpolation(mesh, point.color));
         if matches!(
             mesh.color_space(),
             MeshGradientColorSpace::Okhsla | MeshGradientColorSpace::OkhslaLong
@@ -1594,7 +1594,7 @@ fn unwrap_mesh_hues(colors: &mut [Vec4], width: usize, space: MeshGradientColorS
     }
 }
 
-fn mesh_gradient_style_uniform(
+fn build_mesh_gradient_style_uniform(
     gradient: &ExtractedGradient,
     mesh: &MeshGradient,
 ) -> Result<(MeshGradientStyleUniform, Option<MeshGradientClipUniform>), MeshUniformError> {
@@ -1602,7 +1602,7 @@ fn mesh_gradient_style_uniform(
     if !size.is_finite()
         || size.x <= 0.0
         || size.y <= 0.0
-        || !affine_is_finite(gradient.transform)
+        || !is_affine_transform_finite(gradient.transform)
         || mesh.points().len() != mesh.width() * mesh.height()
         || mesh.width() > MAX_MESH_GRADIENT_DIMENSION
         || mesh.height() > MAX_MESH_GRADIENT_DIMENSION
@@ -1620,7 +1620,7 @@ fn mesh_gradient_style_uniform(
     if clip_rects.iter().any(|clip| {
         !clip.rect.min.is_finite()
             || !clip.rect.max.is_finite()
-            || !affine_is_finite(clip.world_to_clip_local)
+            || !is_affine_transform_finite(clip.world_to_clip_local)
     }) {
         return Err(MeshUniformError::Invalid);
     }
@@ -1738,7 +1738,7 @@ fn prepare_mesh_gradients(
             {
                 continue;
             }
-            let axes = physical_axes(
+            let axes = compute_physical_axes(
                 gradient.rect.size(),
                 gradient.transform.matrix2,
                 mesh.display_scale,
@@ -1751,8 +1751,8 @@ fn prepare_mesh_gradients(
             if selection.capped && selection.report_cap {
                 warn!(
                     "mesh gradient reached its adaptive tessellation cap: {} triangles, maximum axis subdivision {}, geometry error {:.3}px, color error {:.4}",
-                    selection.key.triangles(),
-                    selection.key.maximum_subdivisions(),
+                    selection.key.count_triangles(),
+                    selection.key.find_maximum_subdivisions(),
                     selection.error.geometry,
                     selection.error.color,
                 );
@@ -1767,8 +1767,9 @@ fn prepare_mesh_gradients(
                 continue;
             }
 
-            let (style_value, clip_value) = match mesh_gradient_style_uniform(gradient, &mesh.mesh)
-            {
+            let (style_value, clip_value) = match build_mesh_gradient_style_uniform(
+                gradient, &mesh.mesh,
+            ) {
                 Ok(uniform) => uniform,
                 Err(MeshUniformError::FullyClipped) => continue,
                 Err(error) => {
@@ -1794,7 +1795,7 @@ fn prepare_mesh_gradients(
             };
             let bind_group = binding_cache.get(
                 mesh.id,
-                mesh_gradient_points_uniform(&mesh.mesh),
+                build_mesh_gradient_points_uniform(&mesh.mesh),
                 style_value,
                 clip_value,
                 layout,
@@ -1937,7 +1938,7 @@ mod tests {
     use bevy_ui::{CalculatedClipRect, MeshGradientColorSpace, MeshGradientPoint};
     use smallvec::SmallVec;
 
-    fn full_capacity_mesh() -> MeshGradient {
+    fn create_full_capacity_mesh() -> MeshGradient {
         let mut points = Vec::with_capacity(MAX_MESH_GRADIENT_POINTS);
         for y in 0..16 {
             for x in 0..16 {
@@ -1952,13 +1953,13 @@ mod tests {
             .unwrap()
     }
 
-    fn shader_id(value: u128) -> AssetId<Shader> {
+    fn create_shader_id(value: u128) -> AssetId<Shader> {
         AssetId::Uuid {
             uuid: Uuid::from_u128(value),
         }
     }
 
-    fn gradient_shader_cache() -> ShaderCache<String, ()> {
+    fn create_gradient_shader_cache() -> ShaderCache<String, ()> {
         let mut cache = ShaderCache::new((), |_, source, _| match source {
             ShaderCacheSource::Wgsl(source) => {
                 let module = naga::front::wgsl::parse_str(&source)
@@ -1975,37 +1976,37 @@ mod tests {
         });
         let shaders = [
             (
-                shader_id(1),
+                create_shader_id(1),
                 "embedded://bevy_ui_render/mesh_gradient.wesl",
                 include_str!("mesh_gradient.wesl"),
             ),
             (
-                shader_id(2),
+                create_shader_id(2),
                 "embedded://bevy_ui_render/ui.wesl",
                 include_str!("ui.wesl"),
             ),
             (
-                shader_id(3),
+                create_shader_id(3),
                 "embedded://bevy_render/view.wesl",
                 include_str!("../../bevy_render/src/view.wesl"),
             ),
             (
-                shader_id(4),
+                create_shader_id(4),
                 "embedded://bevy_render/color_operations.wesl",
                 include_str!("../../bevy_render/src/color_operations.wesl"),
             ),
             (
-                shader_id(5),
+                create_shader_id(5),
                 "embedded://bevy_render/maths.wesl",
                 include_str!("../../bevy_render/src/maths.wesl"),
             ),
             (
-                shader_id(6),
+                create_shader_id(6),
                 "embedded://bevy_ui_render/gradient_color.wesl",
                 include_str!("gradient_color.wesl"),
             ),
             (
-                shader_id(7),
+                create_shader_id(7),
                 "embedded://bevy_ui_render/gradient.wesl",
                 include_str!("gradient.wesl"),
             ),
@@ -2018,8 +2019,8 @@ mod tests {
 
     #[test]
     fn every_mesh_shader_permutation_compiles() {
-        let mut cache = gradient_shader_cache();
-        let mesh_shader_id = shader_id(1);
+        let mut cache = create_gradient_shader_cache();
+        let mesh_shader_id = create_shader_id(1);
         let mut permutation = 0;
 
         for anti_alias in [false, true] {
@@ -2054,7 +2055,11 @@ mod tests {
                                 target_format: TextureFormat::Rgba8UnormSrgb,
                             };
                             let compiled = cache
-                                .get(permutation, mesh_shader_id, &gradient_shader_defs(key))
+                                .get(
+                                    permutation,
+                                    mesh_shader_id,
+                                    &build_gradient_shader_defs(key),
+                                )
                                 .unwrap_or_else(|error| {
                                     panic!("mesh-gradient permutation {key:?} failed: {error}")
                                 });
@@ -2063,7 +2068,7 @@ mod tests {
                             assert!(compiled.contains("fn fragment"));
                             assert_eq!(compiled.contains("world_point: vec2<f32>"), mesh_clipped);
                             assert_eq!(
-                                compiled.contains("fn smooth_okhsl_blue"),
+                                compiled.contains("fn blend_okhsl_blue_cusp"),
                                 matches!(
                                     color_space,
                                     InterpolationColorSpace::Okhsla
@@ -2087,7 +2092,7 @@ mod tests {
 
     #[test]
     fn every_regular_gradient_color_space_compiles() {
-        let mut cache = gradient_shader_cache();
+        let mut cache = create_gradient_shader_cache();
         for (index, color_space) in [
             InterpolationColorSpace::Oklaba,
             InterpolationColorSpace::Oklcha,
@@ -2116,7 +2121,7 @@ mod tests {
                 target_format: TextureFormat::Rgba8UnormSrgb,
             };
             cache
-                .get(index, shader_id(7), &gradient_shader_defs(key))
+                .get(index, create_shader_id(7), &build_gradient_shader_defs(key))
                 .unwrap_or_else(|error| {
                     panic!("regular gradient color space {color_space:?} failed: {error}")
                 });
@@ -2125,45 +2130,45 @@ mod tests {
 
     #[test]
     fn surface_bounds_cache_uses_only_inputs_that_affect_bounds() {
-        let mut left = full_capacity_mesh();
+        let mut left = create_full_capacity_mesh();
         let mut right = left.clone();
         right
             .try_set_color(0, Color::linear_rgba(8.0, -2.0, 1.0, 0.5))
             .unwrap();
-        assert!(!surface_bounds_inputs_match(&left, &right));
+        assert!(!have_matching_surface_bounds_inputs(&left, &right));
 
         left.set_color_interpolation(MeshGradientColorInterpolation::Bicubic);
         right.set_color_interpolation(MeshGradientColorInterpolation::Bicubic);
-        assert!(surface_bounds_inputs_match(&left, &right));
+        assert!(have_matching_surface_bounds_inputs(&left, &right));
 
         left.set_color_interpolation(MeshGradientColorInterpolation::Vertex);
         left.try_set_color_space(MeshGradientColorSpace::Hsva)
             .unwrap();
-        assert!(surface_bounds_inputs_match(&left, &right));
+        assert!(have_matching_surface_bounds_inputs(&left, &right));
 
         right.set_color_interpolation(MeshGradientColorInterpolation::Vertex);
-        assert!(!surface_bounds_inputs_match(&left, &right));
+        assert!(!have_matching_surface_bounds_inputs(&left, &right));
         right
             .try_set_color_space(MeshGradientColorSpace::HsvaLong)
             .unwrap();
-        assert!(surface_bounds_inputs_match(&left, &right));
+        assert!(have_matching_surface_bounds_inputs(&left, &right));
     }
 
     #[test]
     fn folded_meshes_cull_only_the_locally_reversed_surface() {
-        let ordinary = mesh_gradient_primitive_state(false, false);
+        let ordinary = build_mesh_gradient_primitive_state(false, false);
         assert_eq!(ordinary.cull_mode, None);
 
-        let forward = mesh_gradient_primitive_state(true, false);
+        let forward = build_mesh_gradient_primitive_state(true, false);
         assert_eq!(forward.cull_mode, Some(Face::Back));
         assert_eq!(forward.front_face, FrontFace::Cw);
 
-        let mirrored = mesh_gradient_primitive_state(true, true);
+        let mirrored = build_mesh_gradient_primitive_state(true, true);
         assert_eq!(mirrored.cull_mode, Some(Face::Back));
         assert_eq!(mirrored.front_face, FrontFace::Ccw);
     }
 
-    fn extracted(clip: Option<CalculatedClip>) -> ExtractedGradient {
+    fn create_extracted_gradient(clip: Option<CalculatedClip>) -> ExtractedGradient {
         ExtractedGradient {
             stack_index: 0,
             transform: Affine2::IDENTITY,
@@ -2183,9 +2188,10 @@ mod tests {
         assert!(MeshGradientPointsUniform::SHADER_SIZE.get() <= 16 * 1024);
         assert!(MeshGradientStyleUniform::SHADER_SIZE.get() <= 16 * 1024);
         assert!(MeshGradientClipUniform::SHADER_SIZE.get() <= 16 * 1024);
-        let mesh = full_capacity_mesh();
-        let points = mesh_gradient_points_uniform(&mesh);
-        let (style, clip) = mesh_gradient_style_uniform(&extracted(None), &mesh).unwrap();
+        let mesh = create_full_capacity_mesh();
+        let points = build_mesh_gradient_points_uniform(&mesh);
+        let (style, clip) =
+            build_mesh_gradient_style_uniform(&create_extracted_gradient(None), &mesh).unwrap();
         assert!(clip.is_none());
         assert_eq!(style.metadata, UVec4::new(16, 16, 0, 0));
         assert_eq!(
@@ -2218,7 +2224,7 @@ mod tests {
                 space,
             )
             .unwrap();
-            let points = mesh_gradient_points_uniform(&mesh);
+            let points = build_mesh_gradient_points_uniform(&mesh);
             assert!((points.colors[1].x - points.colors[0].x - expected_top_delta).abs() < 1e-5);
             for (index, hue) in [350.0, 10.0, 240.0, 280.0].into_iter().enumerate() {
                 assert!((points.colors[index].x.rem_euclid(1.0) - hue / 360.0).abs() < 1e-5);
@@ -2254,7 +2260,7 @@ mod tests {
                 space,
             )
             .unwrap();
-            let points = mesh_gradient_points_uniform(&mesh);
+            let points = build_mesh_gradient_points_uniform(&mesh);
             let sample = |u: f32, v: f32| {
                 let value = points.colors[0]
                     .lerp(points.colors[1], u)
@@ -2373,11 +2379,11 @@ mod tests {
             rect: Rect::from_corners(Vec2::new(2.0, 3.0), Vec2::new(17.0, 19.0)),
             world_to_clip_local: Affine2::from_translation(Vec2::new(5.0, 7.0)),
         };
-        let (style, clip) = mesh_gradient_style_uniform(
-            &extracted(Some(CalculatedClip::Rects(SmallVec::from_iter([
+        let (style, clip) = build_mesh_gradient_style_uniform(
+            &create_extracted_gradient(Some(CalculatedClip::Rects(SmallVec::from_iter([
                 clip_rect,
             ])))),
-            &full_capacity_mesh(),
+            &create_full_capacity_mesh(),
         )
         .unwrap();
         let clip = clip.unwrap();
@@ -2397,9 +2403,9 @@ mod tests {
                 world_to_clip_local: Affine2::IDENTITY,
             }));
         assert!(matches!(
-            mesh_gradient_style_uniform(
-                &extracted(Some(CalculatedClip::Rects(clips))),
-                &full_capacity_mesh(),
+            build_mesh_gradient_style_uniform(
+                &create_extracted_gradient(Some(CalculatedClip::Rects(clips))),
+                &create_full_capacity_mesh(),
             ),
             Err(MeshUniformError::TooManyClips(count)) if count == MAX_MESH_GRADIENT_CLIPS + 1
         ));

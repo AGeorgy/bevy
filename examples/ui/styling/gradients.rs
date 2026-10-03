@@ -215,7 +215,7 @@ fn setup(mut commands: Commands) {
                 });
             }
 
-            let mesh = compact_mesh_gradient();
+            let mesh = create_compact_mesh_gradient();
             commands
                 .spawn(Node {
                     flex_direction: FlexDirection::Column,
@@ -247,7 +247,7 @@ fn setup(mut commands: Commands) {
         .add_child(buttons_id);
 }
 
-fn compact_mesh_gradient() -> MeshGradient {
+fn create_compact_mesh_gradient() -> MeshGradient {
     MeshGradient::new_in_color_space(
         2,
         2,
@@ -415,7 +415,7 @@ mod tests {
         app.init_resource::<AppSettings>()
             .add_observer(on_activate_change_space);
         let button = app.world_mut().spawn((Button, NextButton)).id();
-        let mesh = compact_mesh_gradient();
+        let mesh = create_compact_mesh_gradient();
         assert_eq!(
             InterpolationColorSpace::from(mesh.color_space()),
             COLOR_SPACES[0]
