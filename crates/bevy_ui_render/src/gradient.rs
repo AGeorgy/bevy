@@ -39,7 +39,7 @@ use bevy_render::{
     Extract, ExtractSchedule, Render, RenderSystems,
 };
 use bevy_render::{GpuResourceAppExt, RenderStartup};
-use bevy_shader::{Shader, ShaderDefVal};
+use bevy_shader::{load_shader_library, Shader, ShaderDefVal};
 use bevy_sprite::BorderRect;
 use bevy_text::{EmSize, RemSize};
 use bevy_ui::{
@@ -56,6 +56,7 @@ pub struct GradientPlugin;
 
 impl Plugin for GradientPlugin {
     fn build(&self, app: &mut App) {
+        load_shader_library!(app, "gradient_color.wesl");
         embedded_asset!(app, "gradient.wesl");
         embedded_asset!(app, "mesh_gradient.wesl");
 
@@ -1854,7 +1855,7 @@ mod tests {
         }
     }
 
-    fn mesh_shader_cache() -> (ShaderCache<String, ()>, AssetId<Shader>) {
+    fn gradient_shader_cache() -> ShaderCache<String, ()> {
         let mut cache = ShaderCache::new((), |_, source, _| match source {
             ShaderCacheSource::Wgsl(source) => {
                 let module = naga::front::wgsl::parse_str(&source)
@@ -1895,16 +1896,27 @@ mod tests {
                 "embedded://bevy_render/maths.wesl",
                 include_str!("../../bevy_render/src/maths.wesl"),
             ),
+            (
+                shader_id(6),
+                "embedded://bevy_ui_render/gradient_color.wesl",
+                include_str!("gradient_color.wesl"),
+            ),
+            (
+                shader_id(7),
+                "embedded://bevy_ui_render/gradient.wesl",
+                include_str!("gradient.wesl"),
+            ),
         ];
         for (id, path, source) in shaders {
             cache.set_shader(id, Shader::from_wesl(source, path));
         }
-        (cache, shader_id(1))
+        cache
     }
 
     #[test]
     fn every_mesh_shader_permutation_compiles() {
-        let (mut cache, shader_id) = mesh_shader_cache();
+        let mut cache = gradient_shader_cache();
+        let mesh_shader_id = shader_id(1);
         let mut permutation = 0;
 
         for anti_alias in [false, true] {
@@ -1931,7 +1943,7 @@ mod tests {
                                 target_format: TextureFormat::Rgba8UnormSrgb,
                             };
                             let compiled = cache
-                                .get(permutation, shader_id, &gradient_shader_defs(key))
+                                .get(permutation, mesh_shader_id, &gradient_shader_defs(key))
                                 .unwrap_or_else(|error| {
                                     panic!("mesh-gradient permutation {key:?} failed: {error}")
                                 });
@@ -1947,6 +1959,44 @@ mod tests {
         }
 
         assert_eq!(permutation, 48);
+    }
+
+    #[test]
+    fn every_regular_gradient_color_space_compiles() {
+        let mut cache = gradient_shader_cache();
+        for (index, color_space) in [
+            InterpolationColorSpace::Oklaba,
+            InterpolationColorSpace::Oklcha,
+            InterpolationColorSpace::OklchaLong,
+            InterpolationColorSpace::Okhsla,
+            InterpolationColorSpace::OkhslaLong,
+            InterpolationColorSpace::Srgba,
+            InterpolationColorSpace::LinearRgba,
+            InterpolationColorSpace::Hsla,
+            InterpolationColorSpace::HslaLong,
+            InterpolationColorSpace::Hsva,
+            InterpolationColorSpace::HsvaLong,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let key = UiGradientPipelineKey {
+                anti_alias: true,
+                color_space,
+                mesh: false,
+                mesh_color_interpolation: MeshGradientColorInterpolation::Vertex,
+                mesh_border: false,
+                mesh_clipped: false,
+                mesh_cull_folds: false,
+                mesh_flipped: false,
+                target_format: TextureFormat::Rgba8UnormSrgb,
+            };
+            cache
+                .get(index, shader_id(7), &gradient_shader_defs(key))
+                .unwrap_or_else(|error| {
+                    panic!("regular gradient color space {color_space:?} failed: {error}")
+                });
+        }
     }
 
     #[test]

@@ -1,12 +1,9 @@
-import bevy_render::view::View;
+import bevy_render::view::{View, position_world_to_clip};
 import package::ui::{
     uinode_background_coverage,
     uinode_border_coverage,
 };
-import bevy_render::color_operations::{
-    oklab_to_linear_rgb,
-    srgb_to_linear,
-};
+import package::gradient_color::convert_to_linear_rgba;
 
 const MAX_POINTS: u32 = 256u;
 const MAX_CLIPS: u32 = 128u;
@@ -304,7 +301,7 @@ fn vertex(
         dot(mesh.transform_y.xyz, homogeneous),
     );
     var out: MeshVertexOutput;
-    out.position = view.clip_from_world * vec4(world_point, 0.0, 1.0);
+    out.position = position_world_to_clip(vec3(world_point, 0.0), view.clip_from_world);
 @if(MESH_PARAMETER_UV)
     out.uv = uv;
 @if(VERTEX_COLOR)
@@ -331,16 +328,6 @@ fn outside_clip(world_point: vec2<f32>) -> bool {
         }
     }
     return false;
-}
-
-fn convert_to_linear_rgba(color: vec4<f32>) -> vec4<f32> {
-@if(IN_OKLAB)
-    let rgb = oklab_to_linear_rgb(color.xyz);
-@elif(IN_SRGB)
-    let rgb = srgb_to_linear(color.xyz);
-@else
-    let rgb = color.xyz;
-    return vec4(rgb, clamp(color.a, 0.0, 1.0));
 }
 
 @fragment
@@ -379,5 +366,9 @@ fn fragment(in: MeshVertexOutput) -> @location(0) vec4<f32> {
     let color = interpolation_color;
 @else
     let color = convert_to_linear_rgba(interpolation_color);
-    return vec4(color.rgb, saturate(color.a * coverage));
+@if(VERTEX_COLOR && IN_LINEAR_RGB)
+    let alpha = color.a;
+@else
+    let alpha = clamp(color.a, 0.0, 1.0);
+    return vec4(color.rgb, saturate(alpha * coverage));
 }

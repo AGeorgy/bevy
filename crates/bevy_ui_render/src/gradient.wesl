@@ -3,6 +3,7 @@ import package::ui::{
     draw_uinode_background,
     draw_uinode_border,
 };
+import package::gradient_color::convert_to_linear_rgba;
 
 import bevy_render::color_operations::{
     mix_oklch,
@@ -13,12 +14,6 @@ import bevy_render::color_operations::{
     mix_hsl_long,
     mix_okhsl,
     mix_okhsl_long,
-    oklch_to_linear_rgb,
-    hsv_to_linear_rgb,
-    hsl_to_linear_rgb,
-    oklab_to_linear_rgb,
-    okhsl_to_linear_rgb,
-    srgb_to_linear,
 };
 
 import bevy_render::maths::PI;
@@ -193,36 +188,6 @@ fn mix_colors(
 @else
     // Just lerp in linear RGBA, OkLab and SRGBA spaces
     return mix(start_color, end_color, t);
-}
-
-/// Convert a color from the interpolation color space to linear rgba
-fn convert_to_linear_rgba(
-    color: vec4<f32>,
-) -> vec4<f32> {
-@if(IN_OKLCH)
-    let rgb = oklch_to_linear_rgb(color.xyz);
-@elif(IN_OKLCH_LONG)
-    let rgb = oklch_to_linear_rgb(color.xyz);
-@elif(IN_OKHSL)
-    let rgb = okhsl_to_linear_rgb(color.xyz);
-@elif(IN_OKHSL_LONG)
-    let rgb = okhsl_to_linear_rgb(color.xyz);
-@elif(IN_HSV)
-    let rgb = hsv_to_linear_rgb(color.xyz);
-@elif(IN_HSV_LONG)
-    let rgb = hsv_to_linear_rgb(color.xyz);
-@elif(IN_HSL)
-    let rgb = hsl_to_linear_rgb(color.xyz);
-@elif(IN_HSL_LONG)
-    let rgb = hsl_to_linear_rgb(color.xyz);
-@elif(IN_OKLAB)
-    let rgb = oklab_to_linear_rgb(color.xyz);
-@elif(IN_SRGB)
-    let rgb = srgb_to_linear(color.xyz);
-@else
-    // Color is already in linear rgba space
-    let rgb = color.rgb;
-    return vec4(rgb, color.a);
 }
 
 fn interpolate_gradient(
