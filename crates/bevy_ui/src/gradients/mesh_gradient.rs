@@ -633,6 +633,7 @@ impl MeshGradient {
             ]);
         }
 
+        let gpu_component_range = -(f32::MAX as f64)..=f32::MAX as f64;
         for row in 0..height - 1 {
             for column in 0..width - 1 {
                 if geometry == MeshGradientGeometry::NonFolding {
@@ -640,10 +641,8 @@ impl MeshGradient {
                 }
                 let controls = build_patch_controls(width, height, &values, column, row);
                 if controls.iter().flatten().any(|component| {
-                    !component.lo.is_finite()
-                        || !component.hi.is_finite()
-                        || component.lo.abs() > f32::MAX as f64
-                        || component.hi.abs() > f32::MAX as f64
+                    !gpu_component_range.contains(&component.lo)
+                        || !gpu_component_range.contains(&component.hi)
                 }) {
                     return Err(MeshGradientError::NonFiniteDerived { column, row });
                 }
@@ -887,10 +886,11 @@ fn sample_extended_point(
     for (y, y_weight) in compute_extrapolation_weights(row, height) {
         for (x, x_weight) in compute_extrapolation_weights(column, width) {
             let weight = x_weight * y_weight;
-            if weight != 0.0 {
-                let point = points[y * width + x].map(Interval::from_exact_value);
-                result = add_controls(result, scale_control(point, weight));
+            if weight == 0.0 {
+                continue;
             }
+            let point = points[y * width + x].map(Interval::from_exact_value);
+            result = add_controls(result, scale_control(point, weight));
         }
     }
     result

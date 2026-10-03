@@ -241,6 +241,7 @@ fn create_preset_points(width: usize, height: usize) -> Vec<MeshGradientPoint> {
         ],
     ];
 
+    let reference_preset = (width, height) == (DEFAULT_WIDTH, DEFAULT_HEIGHT);
     (0..width * height)
         .map(|index| {
             let column = index % width;
@@ -248,15 +249,11 @@ fn create_preset_points(width: usize, height: usize) -> Vec<MeshGradientPoint> {
             let x = column as f32 / (width - 1) as f32;
             let y = row as f32 / (height - 1) as f32;
             let mut position = Vec2::new(x, y);
-            if (width, height) != (DEFAULT_WIDTH, DEFAULT_HEIGHT)
-                && column > 0
-                && column + 1 < width
-                && row > 0
-                && row + 1 < height
+            if !reference_preset && column > 0 && column + 1 < width && row > 0 && row + 1 < height
             {
                 position += Vec2::new(0.045, -0.03);
             }
-            let color = if (width, height) == (DEFAULT_WIDTH, DEFAULT_HEIGHT) {
+            let color = if reference_preset {
                 REFERENCE_COLORS[row][column]
             } else {
                 Color::oklaba(
@@ -423,10 +420,7 @@ fn spawn_preview(
         }),
     ));
     if editable {
-        entity.insert(EditorCanvas);
-    }
-    entity.with_children(|preview| {
-        if editable {
+        entity.insert(EditorCanvas).with_children(|preview| {
             let (width, height) = state.mesh.dimensions();
             for row in 0..height {
                 for column in 0..width {
@@ -446,8 +440,8 @@ fn spawn_preview(
                     index == state.selected,
                 ));
             }
-        }
-    });
+        });
+    }
 }
 
 fn spawn_control_edge(parent: &mut ChildSpawnerCommands, from: usize, to: usize) {
@@ -908,11 +902,14 @@ fn animate_control_points(time: Res<Time>, mut state: ResMut<EditorState>) {
     state.elapsed += time.delta_secs();
     let mut candidate = state.rest.clone();
     let (width, height) = state.mesh.dimensions();
+    let displacement = Vec2::new(
+        0.035 * ops::sin(state.elapsed),
+        0.025 * ops::cos(state.elapsed * 0.7),
+    );
     for row in 1..height - 1 {
         for column in 1..width - 1 {
             let point = &mut candidate[row * width + column];
-            point.position.x += 0.035 * ops::sin(state.elapsed);
-            point.position.y += 0.025 * ops::cos(state.elapsed * 0.7);
+            point.position += displacement;
         }
     }
     if let Err(error) = state.mesh.try_replace_points(candidate) {

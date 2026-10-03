@@ -476,23 +476,23 @@ impl VectorBounds {
     }
 
     fn compute_transformed_length_bound(self, axes: [DVec2; 2]) -> f64 {
-        [self.x.lo, self.x.hi]
-            .into_iter()
-            .flat_map(|x| {
-                [self.y.lo, self.y.hi].into_iter().flat_map(move |y| {
-                    let screen_x = Interval::from_exact_value(x)
-                        .scale(axes[0].x)
-                        .add(Interval::from_exact_value(y).scale(axes[1].x));
-                    let screen_y = Interval::from_exact_value(x)
-                        .scale(axes[0].y)
-                        .add(Interval::from_exact_value(y).scale(axes[1].y));
-                    [screen_x.lo, screen_x.hi].into_iter().flat_map(move |x| {
-                        [screen_y.lo, screen_y.hi]
-                            .map(|y| compute_length_upper_bound(DVec2::new(x, y)))
-                    })
-                })
-            })
-            .fold(0.0, f64::max)
+        let mut maximum = 0.0_f64;
+        for x in [self.x.lo, self.x.hi] {
+            for y in [self.y.lo, self.y.hi] {
+                let screen_x = Interval::from_exact_value(x)
+                    .scale(axes[0].x)
+                    .add(Interval::from_exact_value(y).scale(axes[1].x));
+                let screen_y = Interval::from_exact_value(x)
+                    .scale(axes[0].y)
+                    .add(Interval::from_exact_value(y).scale(axes[1].y));
+                for x in [screen_x.lo, screen_x.hi] {
+                    for y in [screen_y.lo, screen_y.hi] {
+                        maximum = maximum.max(compute_length_upper_bound(DVec2::new(x, y)));
+                    }
+                }
+            }
+        }
+        maximum
     }
 
     fn compute_transformed_extent(self, axes: [DVec2; 2]) -> DVec2 {
@@ -835,7 +835,6 @@ impl ScreenBounds {
             if current.bound.meets_tolerance(maximum_error, fraction) {
                 return topology;
             }
-            let mut best: Option<(TopologyKey, ErrorScore)> = None;
             let [column, row] = current.worst_patch;
             let mut candidates = SmallVec::<[TopologyKey; 6]>::new();
             candidates.extend(
@@ -860,31 +859,9 @@ impl ScreenBounds {
             if row + 1 < self.height - 1 && columns > topology.u_subdivisions(column, row + 1) {
                 candidates.extend(topology.try_double_u_subdivisions(column, row + 1));
             }
-            for candidate in candidates {
-                if candidate.count_triangles() > MAX_TRIANGLES
-                    || cap.is_some_and(|cap| !candidate.fits_within(cap))
-                {
-                    continue;
-                }
-                let score = self.compute_error_score(&candidate);
-                let improves_best = best.as_ref().is_none_or(|(best_topology, best_score)| {
-                    score
-                        .maximum
-                        .total_cmp(&best_score.maximum)
-                        .then_with(|| score.sum.total_cmp(&best_score.sum))
-                        .then_with(|| score.shape.total_cmp(&best_score.shape))
-                        .then_with(|| {
-                            candidate
-                                .count_triangles()
-                                .cmp(&best_topology.count_triangles())
-                        })
-                        .is_lt()
-                });
-                if improves_best {
-                    best = Some((candidate, score));
-                }
-            }
-            let Some((candidate, _)) = best else {
+            let Some(candidate) =
+                self.find_best_refinement(candidates, cap, Self::compute_error_score)
+            else {
                 return topology;
             };
             topology = candidate;
@@ -904,42 +881,53 @@ impl ScreenBounds {
                 return topology;
             }
             let [column, row] = current.worst_patch;
-            let mut best: Option<(TopologyKey, ErrorScore)> = None;
-            for candidate in [
+            let candidates = [
                 topology.try_double_u_subdivisions(column, row),
                 topology.try_double_v_subdivisions(column, row),
             ]
             .into_iter()
-            .flatten()
-            {
-                if candidate.count_triangles() > MAX_TRIANGLES
-                    || cap.is_some_and(|cap| !candidate.fits_within(cap))
-                {
-                    continue;
-                }
-                let score = self.compute_base_error_score(&candidate);
-                let improves_best = best.as_ref().is_none_or(|(best_topology, best_score)| {
-                    score
-                        .maximum
-                        .total_cmp(&best_score.maximum)
-                        .then_with(|| score.sum.total_cmp(&best_score.sum))
-                        .then_with(|| score.shape.total_cmp(&best_score.shape))
-                        .then_with(|| {
-                            candidate
-                                .count_triangles()
-                                .cmp(&best_topology.count_triangles())
-                        })
-                        .is_lt()
-                });
-                if improves_best {
-                    best = Some((candidate, score));
-                }
-            }
-            let Some((candidate, _)) = best else {
+            .flatten();
+            let Some(candidate) =
+                self.find_best_refinement(candidates, cap, Self::compute_base_error_score)
+            else {
                 return topology;
             };
             topology = candidate;
         }
+    }
+
+    fn find_best_refinement(
+        &self,
+        candidates: impl IntoIterator<Item = TopologyKey>,
+        cap: Option<&TopologyKey>,
+        compute_score: impl Fn(&Self, &TopologyKey) -> ErrorScore,
+    ) -> Option<TopologyKey> {
+        let mut best: Option<(TopologyKey, ErrorScore)> = None;
+        for candidate in candidates {
+            if candidate.count_triangles() > MAX_TRIANGLES
+                || cap.is_some_and(|cap| !candidate.fits_within(cap))
+            {
+                continue;
+            }
+            let score = compute_score(self, &candidate);
+            let improves_best = best.as_ref().is_none_or(|(best_topology, best_score)| {
+                score
+                    .maximum
+                    .total_cmp(&best_score.maximum)
+                    .then_with(|| score.sum.total_cmp(&best_score.sum))
+                    .then_with(|| score.shape.total_cmp(&best_score.shape))
+                    .then_with(|| {
+                        candidate
+                            .count_triangles()
+                            .cmp(&best_topology.count_triangles())
+                    })
+                    .is_lt()
+            });
+            if improves_best {
+                best = Some((candidate, score));
+            }
+        }
+        best.map(|(topology, _)| topology)
     }
 
     fn estimate_error_bound(&self, topology: &TopologyKey) -> ErrorBound {

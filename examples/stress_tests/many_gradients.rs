@@ -215,7 +215,7 @@ fn animate_gradients(
     mut gradients: Query<(&mut BackgroundGradient, &GradientNode)>,
     args: Res<Args>,
     time: Res<Time>,
-    mut benchmark: Option<ResMut<BenchmarkSamples>>,
+    benchmark: Option<ResMut<BenchmarkSamples>>,
 ) {
     if !args.animate {
         return;
@@ -225,68 +225,71 @@ fn animate_gradients(
     let t = time.elapsed_secs();
 
     for (mut bg_gradient, node) in &mut gradients {
-        let offset = node.index as f32 * 0.01;
-        let hue_shift = sin(t + offset) * 0.5 + 0.5;
-
-        if let Some(Gradient::Mesh(mesh)) = bg_gradient.0.get_mut(0) {
-            let phase = t + node.index as f32 * 0.07;
-            mesh.try_edit_points(|points| {
-                for row in 1..3 {
-                    for column in 1..3 {
-                        let point = &mut points[row * 4 + column];
-                        let offset = phase + row as f32 * 0.8 + column as f32 * 0.6;
-                        point.position = Vec2::new(
-                            column as f32 / 3.0 + sin(offset) * 0.022,
-                            row as f32 / 3.0 + sin(offset * 0.83) * 0.018,
-                        );
+        match bg_gradient.0.first_mut() {
+            Some(Gradient::Mesh(mesh)) => {
+                let phase = t + node.index as f32 * 0.07;
+                mesh.try_edit_points(|points| {
+                    for row in 1..3 {
+                        for column in 1..3 {
+                            let point = &mut points[row * 4 + column];
+                            let offset = phase + row as f32 * 0.8 + column as f32 * 0.6;
+                            point.position = Vec2::new(
+                                column as f32 / 3.0 + sin(offset) * 0.022,
+                                row as f32 / 3.0 + sin(offset * 0.83) * 0.018,
+                            );
+                        }
                     }
-                }
-                Ok(())
-            })
-            .expect("the bounded benchmark animation must remain valid");
-        } else if let Some(Gradient::Linear(gradient)) = bg_gradient.0.get_mut(0) {
-            let color1 = Color::hsl(hue_shift * 360.0, 1.0, 0.5);
-            let color2 = Color::hsl((hue_shift + 0.3) * 360.0 % 360.0, 1.0, 0.5);
+                    Ok(())
+                })
+                .expect("the bounded benchmark animation must remain valid");
+            }
+            Some(Gradient::Linear(gradient)) => {
+                let offset = node.index as f32 * 0.01;
+                let hue_shift = sin(t + offset) * 0.5 + 0.5;
+                let color1 = Color::hsl(hue_shift * 360.0, 1.0, 0.5);
+                let color2 = Color::hsl((hue_shift + 0.3) * 360.0 % 360.0, 1.0, 0.5);
 
-            gradient.stops = vec![
-                ColorStop::new(color1, percent(0)),
-                ColorStop::new(color2, percent(100)),
-                ColorStop::new(
-                    Color::hsl((hue_shift + 0.1) * 360.0 % 360.0, 1.0, 0.5),
-                    percent(20),
-                ),
-                ColorStop::new(
-                    Color::hsl((hue_shift + 0.15) * 360.0 % 360.0, 1.0, 0.5),
-                    percent(40),
-                ),
-                ColorStop::new(
-                    Color::hsl((hue_shift + 0.2) * 360.0 % 360.0, 1.0, 0.5),
-                    percent(60),
-                ),
-                ColorStop::new(
-                    Color::hsl((hue_shift + 0.25) * 360.0 % 360.0, 1.0, 0.5),
-                    percent(80),
-                ),
-                ColorStop::new(
-                    Color::hsl((hue_shift + 0.28) * 360.0 % 360.0, 1.0, 0.5),
-                    percent(90),
-                ),
-            ];
+                gradient.stops = vec![
+                    ColorStop::new(color1, percent(0)),
+                    ColorStop::new(color2, percent(100)),
+                    ColorStop::new(
+                        Color::hsl((hue_shift + 0.1) * 360.0 % 360.0, 1.0, 0.5),
+                        percent(20),
+                    ),
+                    ColorStop::new(
+                        Color::hsl((hue_shift + 0.15) * 360.0 % 360.0, 1.0, 0.5),
+                        percent(40),
+                    ),
+                    ColorStop::new(
+                        Color::hsl((hue_shift + 0.2) * 360.0 % 360.0, 1.0, 0.5),
+                        percent(60),
+                    ),
+                    ColorStop::new(
+                        Color::hsl((hue_shift + 0.25) * 360.0 % 360.0, 1.0, 0.5),
+                        percent(80),
+                    ),
+                    ColorStop::new(
+                        Color::hsl((hue_shift + 0.28) * 360.0 % 360.0, 1.0, 0.5),
+                        percent(90),
+                    ),
+                ];
+            }
+            _ => {}
         }
     }
-    if let (Some(started), Some(benchmark)) = (started, benchmark.as_deref_mut()) {
+    if let (Some(started), Some(mut benchmark)) = (started, benchmark) {
         benchmark.last_update_cpu_ms = started.elapsed().as_secs_f64() * 1_000.0;
     }
 }
 
 fn create_mesh_gradient(index: usize) -> MeshGradient {
+    let phase = index as f32 * 0.13;
     let points = (0..16)
         .map(|point| {
             let column = point % 4;
             let row = point / 4;
             let x = column as f32 / 3.0;
             let y = row as f32 / 3.0;
-            let phase = index as f32 * 0.13;
             MeshGradientPoint::new(
                 Vec2::new(x, y),
                 Color::oklaba(

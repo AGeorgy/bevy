@@ -435,14 +435,14 @@ fn vertex(
 
 @if(MESH_CLIPPED)
 fn is_outside_clip(world_point: vec2<f32>) -> bool {
+    let homogeneous = vec3(world_point, 1.0);
     for (var index = 0u; index < min(clips.metadata.x, MAX_CLIPS); index += 1u) {
-        let homogeneous = vec3(world_point, 1.0);
         let local = vec2(
             dot(clips.clip_transform_x[index].xyz, homogeneous),
             dot(clips.clip_transform_y[index].xyz, homogeneous),
         );
         let rect = clips.clip_rects[index];
-        if local.x < rect.x || local.y < rect.y || local.x > rect.z || local.y > rect.w {
+        if any(local < rect.xy) || any(local > rect.zw) {
             return true;
         }
     }

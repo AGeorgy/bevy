@@ -235,18 +235,16 @@ fn build_gradient_shader_defs(key: UiGradientPipelineKey) -> Vec<ShaderDefVal> {
     let hue_based = MeshGradientColorSpace::from(key.color_space).is_hue_based();
     if hue_based {
         shader_defs.push("HUE_COLOR".into());
+    }
+    if hue_based || key.mesh_color_interpolation == MeshGradientColorInterpolation::Bicubic {
         shader_defs.push("MESH_PARAMETER_UV".into());
     }
-    match key.mesh_color_interpolation {
-        MeshGradientColorInterpolation::Vertex if hue_based => {
-            shader_defs.push("BILINEAR_COLOR".into());
-        }
-        MeshGradientColorInterpolation::Vertex => shader_defs.push("VERTEX_COLOR".into()),
-        MeshGradientColorInterpolation::Bicubic => {
-            shader_defs.push("BICUBIC_COLOR".into());
-            shader_defs.push("MESH_PARAMETER_UV".into());
-        }
-    }
+    let interpolation = match key.mesh_color_interpolation {
+        MeshGradientColorInterpolation::Vertex if hue_based => "BILINEAR_COLOR",
+        MeshGradientColorInterpolation::Vertex => "VERTEX_COLOR",
+        MeshGradientColorInterpolation::Bicubic => "BICUBIC_COLOR",
+    };
+    shader_defs.push(interpolation.into());
     if key.mesh_border {
         shader_defs.push("MESH_BORDER".into());
     }
@@ -398,20 +396,19 @@ fn have_matching_surface_bounds_inputs(left: &MeshGradient, right: &MeshGradient
         mesh.color_interpolation() == MeshGradientColorInterpolation::Vertex
             && !mesh.color_space().is_hue_based()
     };
-    left.dimensions() == right.dimensions()
-        && uses_vertex_colors(left) == uses_vertex_colors(right)
-        && left
-            .points()
-            .iter()
-            .zip(right.points())
-            .all(|(left, right)| left.position == right.position)
-        && (!uses_vertex_colors(left)
-            || left.color_space() == right.color_space()
-                && left
-                    .points()
-                    .iter()
-                    .zip(right.points())
-                    .all(|(left, right)| left.color == right.color))
+    let compare_colors = uses_vertex_colors(left);
+    if left.dimensions() != right.dimensions()
+        || compare_colors != uses_vertex_colors(right)
+        || (compare_colors && left.color_space() != right.color_space())
+    {
+        return false;
+    }
+    left.points()
+        .iter()
+        .zip(right.points())
+        .all(|(left, right)| {
+            left.position == right.position && (!compare_colors || left.color == right.color)
+        })
 }
 
 impl ResolvedGradient {
@@ -648,8 +645,8 @@ pub fn extract_gradients(
                 true,
             ),
         ]
-        .iter()
-        .filter_map(|(g, n, border_layer)| g.map(|g| (g, *n, *border_layer)))
+        .into_iter()
+        .filter_map(|(g, n, border_layer)| g.map(|g| (g, n, border_layer)))
         {
             for (layer, gradient) in gradients.iter().enumerate() {
                 if gradient.is_empty() {
@@ -658,10 +655,10 @@ pub fn extract_gradients(
 
                 nodes_processed_this_frame.insert(main_entity);
 
-                if let Some(color) = gradient.get_single() {
+                let (stops, resolved_gradient) = if let Some(color) = gradient.get_single() {
                     // With a single color stop there's no gradient, fill the node with the color
                     let length = compute_gradient_line_length(0.0, uinode.size);
-                    let extracted_stops = compute_color_stops(
+                    let stops = compute_color_stops(
                         &[
                             ColorStop::new(color, Val::Percent(0.0)),
                             ColorStop::new(color, Val::Percent(100.0)),
@@ -673,234 +670,138 @@ pub fn extract_gradients(
                         uinode.em_size,
                         uinode.rem_size,
                     );
-                    extracted_gradients
-                        .items
-                        .entry(main_entity)
-                        .or_insert_with(|| (extracted_camera_entity, Default::default()))
-                        .1
-                        .insert(
-                            commands.spawn_empty().id(),
-                            ExtractedGradient {
-                                stack_index: stack_index.0,
-                                transform: transform.into(),
-                                stops: extracted_stops,
-                                rect: Rect {
-                                    min: Vec2::ZERO,
-                                    max: uinode.size,
+                    (stops, ResolvedGradient::Linear { angle: 0.0 })
+                } else {
+                    match gradient {
+                        Gradient::Linear(LinearGradient { angle, stops, .. }) => {
+                            let length = compute_gradient_line_length(*angle, uinode.size);
+                            let stops = compute_color_stops(
+                                stops,
+                                target.scale_factor(),
+                                length,
+                                target.physical_size().as_vec2(),
+                                &mut sorted_stops,
+                                uinode.em_size,
+                                uinode.rem_size,
+                            );
+                            (stops, ResolvedGradient::Linear { angle: *angle })
+                        }
+                        Gradient::Radial(RadialGradient {
+                            position: center,
+                            shape,
+                            stops,
+                            ..
+                        }) => {
+                            let center = center.resolve(
+                                target.scale_factor(),
+                                uinode.size,
+                                target.physical_size().as_vec2(),
+                                uinode.em_size,
+                                uinode.rem_size,
+                            );
+                            let size = shape.resolve(
+                                center,
+                                target.scale_factor(),
+                                uinode.size,
+                                target.physical_size().as_vec2(),
+                                uinode.em_size,
+                                uinode.rem_size,
+                            );
+                            let stops = compute_color_stops(
+                                stops,
+                                target.scale_factor(),
+                                size.x,
+                                target.physical_size().as_vec2(),
+                                &mut sorted_stops,
+                                uinode.em_size,
+                                uinode.rem_size,
+                            );
+                            (stops, ResolvedGradient::Radial { center, size })
+                        }
+                        Gradient::Conic(ConicGradient {
+                            start,
+                            position: center,
+                            stops,
+                            ..
+                        }) => {
+                            let center = center.resolve(
+                                target.scale_factor(),
+                                uinode.size,
+                                target.physical_size().as_vec2(),
+                                uinode.em_size,
+                                uinode.rem_size,
+                            );
+
+                            // sort the explicit stops
+                            sorted_stops.extend(stops.iter().filter_map(|stop| {
+                                stop.angle.map(|angle| {
+                                    (stop.color.to_linear(), angle.clamp(0., TAU), stop.hint)
+                                })
+                            }));
+                            sorted_stops.sort_by_key(|(_, angle, _)| FloatOrd(*angle));
+                            let mut sorted_stops_drain = sorted_stops.drain(..);
+
+                            // fill the extracted stops buffer
+                            let mut stops: Vec<_> = stops
+                                .iter()
+                                .map(|stop| {
+                                    if stop.angle.is_none() {
+                                        (stop.color.to_linear(), f32::NAN, stop.hint)
+                                    } else {
+                                        sorted_stops_drain.next().unwrap()
+                                    }
+                                })
+                                .collect();
+                            interpolate_color_stops(&mut stops, 0., TAU);
+                            (
+                                stops,
+                                ResolvedGradient::Conic {
+                                    start: *start,
+                                    center,
                                 },
-                                clip: clip.cloned(),
-                                node_type,
-                                border_radius: uinode.border_radius,
-                                border: uinode.border,
-                                resolved_gradient: ResolvedGradient::Linear { angle: 0.0 },
-                                color_space: gradient.get_color_space(),
+                            )
+                        }
+                        Gradient::Mesh(mesh) => {
+                            let id = MeshGradientId {
+                                main_entity,
+                                layer: layer as u32,
+                                border: border_layer,
+                            };
+                            (
+                                Vec::new(),
+                                ResolvedGradient::Mesh(ResolvedMeshGradient {
+                                    mesh: mesh.clone(),
+                                    bounds: surface_cache.get(id, mesh),
+                                    id,
+                                    display_scale: target.scale_factor(),
+                                }),
+                            )
+                        }
+                    }
+                };
+                extracted_gradients
+                    .items
+                    .entry(main_entity)
+                    .or_insert_with(|| (extracted_camera_entity, Default::default()))
+                    .1
+                    .insert(
+                        commands.spawn_empty().id(),
+                        ExtractedGradient {
+                            stack_index: stack_index.0,
+                            transform: transform.into(),
+                            stops,
+                            rect: Rect {
+                                min: Vec2::ZERO,
+                                max: uinode.size,
                             },
-                        );
-                    continue;
-                }
-                match gradient {
-                    Gradient::Linear(LinearGradient {
-                        color_space,
-                        angle,
-                        stops,
-                    }) => {
-                        let length = compute_gradient_line_length(*angle, uinode.size);
-
-                        let extracted_stops = compute_color_stops(
-                            stops,
-                            target.scale_factor(),
-                            length,
-                            target.physical_size().as_vec2(),
-                            &mut sorted_stops,
-                            uinode.em_size,
-                            uinode.rem_size,
-                        );
-
-                        extracted_gradients
-                            .items
-                            .entry(main_entity)
-                            .or_insert_with(|| (extracted_camera_entity, Default::default()))
-                            .1
-                            .insert(
-                                commands.spawn_empty().id(),
-                                ExtractedGradient {
-                                    stack_index: stack_index.0,
-                                    transform: transform.into(),
-                                    stops: extracted_stops,
-                                    rect: Rect {
-                                        min: Vec2::ZERO,
-                                        max: uinode.size,
-                                    },
-                                    clip: clip.cloned(),
-                                    node_type,
-                                    border_radius: uinode.border_radius,
-                                    border: uinode.border,
-                                    resolved_gradient: ResolvedGradient::Linear { angle: *angle },
-                                    color_space: *color_space,
-                                },
-                            );
-                    }
-                    Gradient::Radial(RadialGradient {
-                        color_space,
-                        position: center,
-                        shape,
-                        stops,
-                    }) => {
-                        let c = center.resolve(
-                            target.scale_factor(),
-                            uinode.size,
-                            target.physical_size().as_vec2(),
-                            uinode.em_size,
-                            uinode.rem_size,
-                        );
-
-                        let size = shape.resolve(
-                            c,
-                            target.scale_factor(),
-                            uinode.size,
-                            target.physical_size().as_vec2(),
-                            uinode.em_size,
-                            uinode.rem_size,
-                        );
-
-                        let length = size.x;
-
-                        let computed_stops = compute_color_stops(
-                            stops,
-                            target.scale_factor(),
-                            length,
-                            target.physical_size().as_vec2(),
-                            &mut sorted_stops,
-                            uinode.em_size,
-                            uinode.rem_size,
-                        );
-
-                        extracted_gradients
-                            .items
-                            .entry(main_entity)
-                            .or_insert_with(|| (extracted_camera_entity, Default::default()))
-                            .1
-                            .insert(
-                                commands.spawn_empty().id(),
-                                ExtractedGradient {
-                                    stack_index: stack_index.0,
-                                    transform: transform.into(),
-                                    stops: computed_stops,
-                                    rect: Rect {
-                                        min: Vec2::ZERO,
-                                        max: uinode.size,
-                                    },
-                                    clip: clip.cloned(),
-                                    node_type,
-                                    border_radius: uinode.border_radius,
-                                    border: uinode.border,
-                                    resolved_gradient: ResolvedGradient::Radial { center: c, size },
-                                    color_space: *color_space,
-                                },
-                            );
-                    }
-                    Gradient::Conic(ConicGradient {
-                        color_space,
-                        start,
-                        position: center,
-                        stops,
-                    }) => {
-                        let g_start = center.resolve(
-                            target.scale_factor(),
-                            uinode.size,
-                            target.physical_size().as_vec2(),
-                            uinode.em_size,
-                            uinode.rem_size,
-                        );
-
-                        // sort the explicit stops
-                        sorted_stops.extend(stops.iter().filter_map(|stop| {
-                            stop.angle.map(|angle| {
-                                (stop.color.to_linear(), angle.clamp(0., TAU), stop.hint)
-                            })
-                        }));
-                        sorted_stops.sort_by_key(|(_, angle, _)| FloatOrd(*angle));
-                        let mut sorted_stops_drain = sorted_stops.drain(..);
-
-                        // fill the extracted stops buffer
-                        let mut extracted_color_stops: Vec<_> = stops
-                            .iter()
-                            .map(|stop| {
-                                if stop.angle.is_none() {
-                                    (stop.color.to_linear(), f32::NAN, stop.hint)
-                                } else {
-                                    sorted_stops_drain.next().unwrap()
-                                }
-                            })
-                            .collect();
-
-                        interpolate_color_stops(&mut extracted_color_stops, 0., TAU);
-
-                        extracted_gradients
-                            .items
-                            .entry(main_entity)
-                            .or_insert_with(|| (extracted_camera_entity, Default::default()))
-                            .1
-                            .insert(
-                                commands.spawn_empty().id(),
-                                ExtractedGradient {
-                                    stack_index: stack_index.0,
-                                    transform: transform.into(),
-                                    stops: extracted_color_stops,
-                                    rect: Rect {
-                                        min: Vec2::ZERO,
-                                        max: uinode.size,
-                                    },
-                                    clip: clip.cloned(),
-                                    node_type,
-                                    border_radius: uinode.border_radius,
-                                    border: uinode.border,
-                                    resolved_gradient: ResolvedGradient::Conic {
-                                        start: *start,
-                                        center: g_start,
-                                    },
-                                    color_space: *color_space,
-                                },
-                            );
-                    }
-                    Gradient::Mesh(mesh) => {
-                        let id = MeshGradientId {
-                            main_entity,
-                            layer: layer as u32,
-                            border: border_layer,
-                        };
-                        extracted_gradients
-                            .items
-                            .entry(main_entity)
-                            .or_insert_with(|| (extracted_camera_entity, Default::default()))
-                            .1
-                            .insert(
-                                commands.spawn_empty().id(),
-                                ExtractedGradient {
-                                    stack_index: stack_index.0,
-                                    transform: transform.into(),
-                                    stops: Vec::new(),
-                                    rect: Rect {
-                                        min: Vec2::ZERO,
-                                        max: uinode.size,
-                                    },
-                                    clip: clip.cloned(),
-                                    node_type,
-                                    border_radius: uinode.border_radius,
-                                    border: uinode.border,
-                                    resolved_gradient: ResolvedGradient::Mesh(
-                                        ResolvedMeshGradient {
-                                            mesh: mesh.clone(),
-                                            bounds: surface_cache.get(id, mesh),
-                                            id,
-                                            display_scale: target.scale_factor(),
-                                        },
-                                    ),
-                                    color_space: mesh.color_space().into(),
-                                },
-                            );
-                    }
-                }
+                            clip: clip.cloned(),
+                            node_type,
+                            border_radius: uinode.border_radius,
+                            border: uinode.border,
+                            resolved_gradient,
+                            color_space: gradient.get_color_space(),
+                        },
+                    );
             }
         }
     }
@@ -974,28 +875,25 @@ pub fn queue_gradient(
             continue;
         };
         for (render_entity, gradient) in sub_gradients.iter() {
-            let mesh_color_interpolation = match &gradient.resolved_gradient {
-                ResolvedGradient::Mesh(mesh) => mesh.mesh.color_interpolation(),
-                _ => MeshGradientColorInterpolation::Vertex,
-            };
-            let mesh_border = gradient.resolved_gradient.is_mesh()
-                && matches!(gradient.node_type, NodeType::Border(_));
-            let mesh_clipped = gradient.resolved_gradient.is_mesh() && gradient.clip.is_some();
-            let mesh_cull_folds = matches!(
-                &gradient.resolved_gradient,
-                ResolvedGradient::Mesh(mesh)
-                    if mesh.mesh.geometry() == MeshGradientGeometry::AllowFolds
-            );
+            let (is_mesh, mesh_color_interpolation, mesh_cull_folds) =
+                match &gradient.resolved_gradient {
+                    ResolvedGradient::Mesh(mesh) => (
+                        true,
+                        mesh.mesh.color_interpolation(),
+                        mesh.mesh.geometry() == MeshGradientGeometry::AllowFolds,
+                    ),
+                    _ => (false, MeshGradientColorInterpolation::Vertex, false),
+                };
             let pipeline = pipelines.specialize(
                 &pipeline_cache,
                 &gradients_pipeline,
                 UiGradientPipelineKey {
                     anti_alias: matches!(ui_anti_alias, None | Some(UiAntiAlias::On)),
                     color_space: gradient.color_space,
-                    mesh: gradient.resolved_gradient.is_mesh(),
+                    mesh: is_mesh,
                     mesh_color_interpolation,
-                    mesh_border,
-                    mesh_clipped,
+                    mesh_border: is_mesh && matches!(gradient.node_type, NodeType::Border(_)),
+                    mesh_clipped: is_mesh && gradient.clip.is_some(),
                     mesh_cull_folds,
                     mesh_flipped: mesh_cull_folds
                         && gradient.transform.matrix2.determinant().is_sign_negative(),
@@ -1004,7 +902,7 @@ pub fn queue_gradient(
             );
 
             transparent_phase.add_transient(TransparentUi {
-                draw_function: if gradient.resolved_gradient.is_mesh() {
+                draw_function: if is_mesh {
                     mesh_draw_function
                 } else {
                     draw_function
@@ -1501,13 +1399,14 @@ fn is_affine_transform_finite(transform: Affine2) -> bool {
 fn build_mesh_gradient_points_uniform(mesh: &MeshGradient) -> MeshGradientPointsUniform {
     let mut positions = [Vec4::ZERO; MAX_MESH_GRADIENT_POINTS];
     let mut colors = [Vec4::ZERO; MAX_MESH_GRADIENT_POINTS];
+    let uses_okhsl = matches!(
+        mesh.color_space(),
+        MeshGradientColorSpace::Okhsla | MeshGradientColorSpace::OkhslaLong
+    );
     for (index, point) in mesh.points().iter().enumerate() {
         positions[index] = point.position.extend(0.0).extend(0.0);
         colors[index] = Vec4::from_array(convert_mesh_color_for_interpolation(mesh, point.color));
-        if matches!(
-            mesh.color_space(),
-            MeshGradientColorSpace::Okhsla | MeshGradientColorSpace::OkhslaLong
-        ) {
+        if uses_okhsl {
             let lab = Oklaba::from(point.color);
             positions[index].z = lab.lightness;
             positions[index].w = hypot(lab.a, lab.b);

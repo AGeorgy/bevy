@@ -356,18 +356,14 @@ fn on_activate_change_space(
     let mut mesh_space = None;
     for (mut gradients, border) in gradients_query.iter_mut() {
         for gradient in gradients.0.iter_mut() {
-            let space = match gradient {
-                Gradient::Linear(linear_gradient) => Some(&mut linear_gradient.color_space),
-                Gradient::Radial(radial_gradient) => Some(&mut radial_gradient.color_space),
-                Gradient::Conic(conic_gradient) => Some(&mut conic_gradient.color_space),
+            match gradient {
+                Gradient::Linear(linear_gradient) => linear_gradient.color_space = next_space,
+                Gradient::Radial(radial_gradient) => radial_gradient.color_space = next_space,
+                Gradient::Conic(conic_gradient) => conic_gradient.color_space = next_space,
                 Gradient::Mesh(mesh) => {
                     update_mesh_color_space(mesh, next_space);
                     mesh_space = Some(mesh.color_space());
-                    None
                 }
-            };
-            if let Some(space) = space {
-                *space = next_space;
             }
         }
         if let Some(mut border) = border {
