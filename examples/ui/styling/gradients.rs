@@ -1,9 +1,9 @@
-//! Simple example demonstrating linear gradients.
+//! Demonstrates UI gradients and their supported interpolation color spaces.
 
 use bevy::{
     color::palettes::css::{BLUE, GREEN, INDIGO, LIME, ORANGE, RED, VIOLET, YELLOW},
     prelude::*,
-    ui::{ColorStop, MeshGradient, MeshGradientPoint},
+    ui::{ColorStop, MeshGradient, MeshGradientColorSpace, MeshGradientPoint},
     ui_widgets::{Activate, Button},
 };
 use std::f32::consts::TAU;
@@ -33,6 +33,10 @@ struct NextButton;
 /// Marker component for the current color space label
 #[derive(Component, Clone, Default)]
 struct CurrentColorSpaceLabel;
+
+/// Shows the mesh preview's interpolation space.
+#[derive(Component)]
+struct MeshColorSpaceLabel;
 
 /// Resource that holds the current settings for the app
 #[derive(Resource, Default)]
@@ -212,23 +216,39 @@ fn setup(mut commands: Commands) {
             }
 
             let mesh = compact_mesh_gradient();
-            commands.spawn((
-                Node {
-                    width: px(150),
-                    height: px(90),
-                    border: UiRect::all(px(10)),
-                    border_radius: BorderRadius::all(px(20)),
+            commands
+                .spawn(Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(5),
                     ..default()
-                },
-                BackgroundGradient::from(mesh.clone()),
-                BorderGradient::from(mesh),
-            ));
+                })
+                .with_children(|commands| {
+                    commands.spawn((
+                        MeshColorSpaceLabel,
+                        Text(format!("Mesh: {:?}", mesh.color_space())),
+                        TextFont {
+                            font_size: FontSize::Px(16.0),
+                            ..default()
+                        },
+                    ));
+                    commands.spawn((
+                        Node {
+                            width: px(150),
+                            height: px(90),
+                            border: UiRect::all(px(10)),
+                            border_radius: BorderRadius::all(px(20)),
+                            ..default()
+                        },
+                        BackgroundGradient::from(mesh.clone()),
+                        BorderGradient::from(mesh),
+                    ));
+                });
         })
         .add_child(buttons_id);
 }
 
 fn compact_mesh_gradient() -> MeshGradient {
-    MeshGradient::new(
+    MeshGradient::new_in_color_space(
         2,
         2,
         [
@@ -239,6 +259,7 @@ fn compact_mesh_gradient() -> MeshGradient {
         ]
         .map(|(position, color)| MeshGradientPoint::new(position, color.into()))
         .to_vec(),
+        MeshGradientColorSpace::from(COLOR_SPACES[0]),
     )
     .expect("the example mesh must be valid")
 }
@@ -307,8 +328,12 @@ fn on_activate_change_space(
     event: On<Activate>,
     mut app_settings: ResMut<AppSettings>,
     button_type_q: Query<(Has<PreviousButton>, Has<NextButton>), With<Button>>,
-    mut gradients_query: Query<&mut BackgroundGradient>,
-    mut label_q: Query<&mut Text, With<CurrentColorSpaceLabel>>,
+    mut gradients_query: Query<(&mut BackgroundGradient, Option<&mut BorderGradient>)>,
+    mut label_q: Query<(
+        &mut Text,
+        Has<CurrentColorSpaceLabel>,
+        Has<MeshColorSpaceLabel>,
+    )>,
 ) {
     let Ok((has_previous, has_next)) = button_type_q.get(event.entity) else {
         return;
@@ -328,22 +353,43 @@ fn on_activate_change_space(
 
     // Set the current space label and update the visuals.
     let next_space = COLOR_SPACES[app_settings.color_space_current_index];
-    for mut label in label_q.iter_mut() {
-        label.0 = format!("Current Space\n{next_space:?}");
-    }
-    for mut gradients in gradients_query.iter_mut() {
+    let mut mesh_space = None;
+    for (mut gradients, border) in gradients_query.iter_mut() {
         for gradient in gradients.0.iter_mut() {
             let space = match gradient {
                 Gradient::Linear(linear_gradient) => Some(&mut linear_gradient.color_space),
                 Gradient::Radial(radial_gradient) => Some(&mut radial_gradient.color_space),
                 Gradient::Conic(conic_gradient) => Some(&mut conic_gradient.color_space),
-                Gradient::Mesh(_) => None,
+                Gradient::Mesh(mesh) => {
+                    update_mesh_color_space(mesh, next_space);
+                    mesh_space = Some(mesh.color_space());
+                    None
+                }
             };
             if let Some(space) = space {
                 *space = next_space;
             }
         }
+        if let Some(mut border) = border {
+            for gradient in &mut border.0 {
+                if let Gradient::Mesh(mesh) = gradient {
+                    update_mesh_color_space(mesh, next_space);
+                }
+            }
+        }
     }
+    for (mut label, current, mesh) in &mut label_q {
+        if current {
+            label.0 = format!("Current Space\n{next_space:?}");
+        } else if mesh && let Some(space) = mesh_space {
+            label.0 = format!("Mesh: {space:?}");
+        }
+    }
+}
+
+fn update_mesh_color_space(mesh: &mut MeshGradient, selected: InterpolationColorSpace) {
+    mesh.try_set_color_space(selected.into())
+        .expect("the example colors must be valid in every UI color space");
 }
 
 #[derive(Component)]
@@ -354,6 +400,65 @@ fn update(time: Res<Time>, mut query: Query<&mut BackgroundGradient, With<Animat
         for gradient in gradients.0.iter_mut() {
             if let Gradient::Linear(LinearGradient { angle, .. }) = gradient {
                 *angle += 0.5 * time.delta_secs();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn color_space_buttons_update_mesh_background_and_border() {
+        let mut app = App::new();
+        app.init_resource::<AppSettings>()
+            .add_observer(on_activate_change_space);
+        let button = app.world_mut().spawn((Button, NextButton)).id();
+        let mesh = compact_mesh_gradient();
+        assert_eq!(
+            InterpolationColorSpace::from(mesh.color_space()),
+            COLOR_SPACES[0]
+        );
+        let preview = app
+            .world_mut()
+            .spawn((
+                BackgroundGradient::from(mesh.clone()),
+                BorderGradient::from(mesh),
+            ))
+            .id();
+        let label = app
+            .world_mut()
+            .spawn((MeshColorSpaceLabel, Text::default()))
+            .id();
+
+        let previous = app.world_mut().spawn((Button, PreviousButton)).id();
+        // Exercise both directions, including wraparound, for every UI space.
+        for (button, direction) in [(button, 1isize), (previous, -1)] {
+            for _ in 0..COLOR_SPACES.len() {
+                let old_index = app
+                    .world()
+                    .resource::<AppSettings>()
+                    .color_space_current_index;
+                let expected_index = (old_index as isize + direction)
+                    .rem_euclid(COLOR_SPACES.len() as isize)
+                    as usize;
+                app.world_mut().trigger(Activate { entity: button });
+                let selected = COLOR_SPACES[expected_index];
+                let entity = app.world().entity(preview);
+                for gradient in [
+                    &entity.get::<BackgroundGradient>().unwrap().0[0],
+                    &entity.get::<BorderGradient>().unwrap().0[0],
+                ] {
+                    let Gradient::Mesh(mesh) = gradient else {
+                        panic!("the preview must remain a mesh gradient");
+                    };
+                    assert_eq!(InterpolationColorSpace::from(mesh.color_space()), selected);
+                }
+                assert_eq!(
+                    app.world().get::<Text>(label).unwrap().0,
+                    format!("Mesh: {:?}", MeshGradientColorSpace::from(selected))
+                );
             }
         }
     }

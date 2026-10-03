@@ -1,6 +1,8 @@
 use super::InterpolationColorSpace;
 use alloc::vec::Vec;
-use bevy_color::{Alpha, Color, ColorToComponents, LinearRgba, Oklaba, Srgba};
+use bevy_color::{
+    Alpha, Color, ColorToComponents, Hsla, Hsva, LinearRgba, Okhsla, Oklaba, Oklcha, Srgba,
+};
 use bevy_math::Vec2;
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 #[cfg(feature = "serialize")]
@@ -44,9 +46,8 @@ impl MeshGradientPoint {
 
 /// A color space supported by mesh-gradient interpolation.
 ///
-/// Mesh gradients deliberately support a smaller set than one-dimensional UI
-/// gradients. All variants interpolate alpha separately from the color
-/// coordinates.
+/// Supports the same color spaces and hue paths as other UI gradients. All
+/// variants interpolate alpha separately from the color coordinates.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Hash, Reflect)]
 #[reflect(Default, Clone, PartialEq, Debug, Hash)]
 #[cfg_attr(
@@ -57,6 +58,22 @@ impl MeshGradientPoint {
 pub enum MeshGradientColorSpace {
     /// Interpolate in `OKLab` for perceptually smoother transitions.
     Oklaba,
+    /// Interpolate in OKLCH along the shorter hue path.
+    Oklcha,
+    /// Interpolate in OKLCH along the longer hue path.
+    OklchaLong,
+    /// Interpolate in HSL along the shorter hue path.
+    Hsla,
+    /// Interpolate in HSL along the longer hue path.
+    HslaLong,
+    /// Interpolate in HSV along the shorter hue path.
+    Hsva,
+    /// Interpolate in HSV along the longer hue path.
+    HsvaLong,
+    /// Interpolate in OKHSL along the shorter hue path.
+    Okhsla,
+    /// Interpolate in OKHSL along the longer hue path.
+    OkhslaLong,
     /// Interpolate in sRGB.
     Srgba,
     /// Interpolate in linear RGB. This is the fastest option because the
@@ -77,10 +94,13 @@ pub enum MeshGradientColorSpace {
 pub enum MeshGradientColorInterpolation {
     /// Evaluate bilinear colors at tessellation vertices and let the rasterizer
     /// interpolate across each triangle. This is the mobile-friendly default.
+    /// Hue-based spaces evaluate bilinear colors per fragment to preserve the
+    /// selected hue path across the circular hue boundary.
     #[default]
     Vertex,
     /// Evaluate a tensor-product Catmull-Rom color surface per fragment. This
     /// gives smooth derivatives across cells at a higher fragment cost.
+    /// Hue coordinates use the same continuous winding field as bilinear mode.
     Bicubic,
 }
 
@@ -104,25 +124,45 @@ pub enum MeshGradientGeometry {
     AllowFolds,
 }
 
+impl MeshGradientColorSpace {
+    /// Whether interpolation follows a circular hue coordinate.
+    pub const fn is_hue_based(self) -> bool {
+        !matches!(self, Self::Oklaba | Self::Srgba | Self::LinearRgba)
+    }
+}
+
 impl From<MeshGradientColorSpace> for InterpolationColorSpace {
     fn from(value: MeshGradientColorSpace) -> Self {
         match value {
             MeshGradientColorSpace::Oklaba => Self::Oklaba,
+            MeshGradientColorSpace::Oklcha => Self::Oklcha,
+            MeshGradientColorSpace::OklchaLong => Self::OklchaLong,
+            MeshGradientColorSpace::Hsla => Self::Hsla,
+            MeshGradientColorSpace::HslaLong => Self::HslaLong,
+            MeshGradientColorSpace::Hsva => Self::Hsva,
+            MeshGradientColorSpace::HsvaLong => Self::HsvaLong,
+            MeshGradientColorSpace::Okhsla => Self::Okhsla,
+            MeshGradientColorSpace::OkhslaLong => Self::OkhslaLong,
             MeshGradientColorSpace::Srgba => Self::Srgba,
             MeshGradientColorSpace::LinearRgba => Self::LinearRgba,
         }
     }
 }
 
-impl TryFrom<InterpolationColorSpace> for MeshGradientColorSpace {
-    type Error = MeshGradientError;
-
-    fn try_from(value: InterpolationColorSpace) -> Result<Self, Self::Error> {
+impl From<InterpolationColorSpace> for MeshGradientColorSpace {
+    fn from(value: InterpolationColorSpace) -> Self {
         match value {
-            InterpolationColorSpace::Oklaba => Ok(Self::Oklaba),
-            InterpolationColorSpace::Srgba => Ok(Self::Srgba),
-            InterpolationColorSpace::LinearRgba => Ok(Self::LinearRgba),
-            color_space => Err(MeshGradientError::UnsupportedColorSpace { color_space }),
+            InterpolationColorSpace::Oklaba => Self::Oklaba,
+            InterpolationColorSpace::Oklcha => Self::Oklcha,
+            InterpolationColorSpace::OklchaLong => Self::OklchaLong,
+            InterpolationColorSpace::Hsla => Self::Hsla,
+            InterpolationColorSpace::HslaLong => Self::HslaLong,
+            InterpolationColorSpace::Hsva => Self::Hsva,
+            InterpolationColorSpace::HsvaLong => Self::HsvaLong,
+            InterpolationColorSpace::Okhsla => Self::Okhsla,
+            InterpolationColorSpace::OkhslaLong => Self::OkhslaLong,
+            InterpolationColorSpace::Srgba => Self::Srgba,
+            InterpolationColorSpace::LinearRgba => Self::LinearRgba,
         }
     }
 }
@@ -220,12 +260,6 @@ pub enum MeshGradientError {
         /// Patch row.
         row: usize,
     },
-    /// A general UI gradient color space is not supported by mesh gradients.
-    #[error("{color_space:?} is not a supported mesh-gradient color space")]
-    UnsupportedColorSpace {
-        /// Unsupported general gradient color space.
-        color_space: InterpolationColorSpace,
-    },
 }
 
 /// A checked, smooth two-dimensional UI gradient controlled by a colored grid.
@@ -251,14 +285,23 @@ pub enum MeshGradientError {
 ///
 /// RGB coordinates may be HDR. Colors are evaluated at tessellation vertices
 /// from the four cell colors by default, then interpolated by the rasterizer.
-/// This mode stays within the convex hull of each cell's interpolation-space
-/// coordinates. [`MeshGradientColorInterpolation::Bicubic`] instead evaluates
-/// the inferred Catmull-Rom color surface per fragment for smooth derivatives;
+/// For Cartesian spaces, this mode stays within the convex hull of each cell's
+/// interpolation-space coordinates. Hue-based spaces choose a consistent
+/// winding along the first grid column and then each row, using the selected
+/// short or long hue path. Independent path choices around a two-dimensional
+/// loop can conflict, so other vertical edges follow that continuous field.
+/// Achromatic points borrow the nearest chromatic grid point's hue. Colors are
+/// evaluated per fragment, and hue wraps only during final RGB conversion.
+/// [`MeshGradientColorInterpolation::Bicubic`] instead evaluates the inferred
+/// Catmull-Rom color surface per fragment for smooth derivatives;
 /// it can overshoot the neighboring color coordinates. Derived alpha is
 /// clamped by the renderer. Input alpha must be in `[0, 1]`, and all input and
 /// derived control values must remain finite.
-/// Colors interpolate in linear RGB by default; `OKLab` and `sRGB` are also
-/// available through [`MeshGradientColorSpace`]. Alpha always interpolates
+/// Colors interpolate in linear RGB by default; all UI gradient spaces are
+/// available through [`MeshGradientColorSpace`]. Near saturated blue, OKHSL
+/// meshes blend toward an Oklab surface derived from the same colored points
+/// to avoid a gamut discontinuity while keeping control-point colors intact.
+/// Alpha always interpolates
 /// separately from the color coordinates. The linear RGB default avoids
 /// fragment color conversion and is the lowest-cost option.
 ///
@@ -636,6 +679,42 @@ fn interpolation_components(color: Color, color_space: MeshGradientColorSpace) -
         MeshGradientColorSpace::Oklaba => Oklaba::from(color).to_f32_array(),
         MeshGradientColorSpace::Srgba => Srgba::from(color).to_f32_array(),
         MeshGradientColorSpace::LinearRgba => LinearRgba::from(color).to_f32_array(),
+        MeshGradientColorSpace::Oklcha | MeshGradientColorSpace::OklchaLong => {
+            let color = Oklcha::from(color);
+            [
+                color.lightness,
+                color.chroma,
+                color.hue / 360.0,
+                color.alpha,
+            ]
+        }
+        MeshGradientColorSpace::Hsla | MeshGradientColorSpace::HslaLong => {
+            let color = Hsla::from(color);
+            [
+                color.hue / 360.0,
+                color.saturation,
+                color.lightness,
+                color.alpha,
+            ]
+        }
+        MeshGradientColorSpace::Hsva | MeshGradientColorSpace::HsvaLong => {
+            let color = Hsva::from(color);
+            [
+                color.hue / 360.0,
+                color.saturation,
+                color.value,
+                color.alpha,
+            ]
+        }
+        MeshGradientColorSpace::Okhsla | MeshGradientColorSpace::OkhslaLong => {
+            let color = Okhsla::from(color);
+            [
+                color.hue / 360.0,
+                color.saturation,
+                color.lightness,
+                color.alpha,
+            ]
+        }
     }
 }
 
@@ -1285,11 +1364,36 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_general_gradient_spaces_are_rejected() {
-        assert!(matches!(
-            MeshGradientColorSpace::try_from(InterpolationColorSpace::Oklcha),
-            Err(MeshGradientError::UnsupportedColorSpace { .. })
-        ));
+    fn every_ui_color_space_is_supported_and_validated() {
+        for space in [
+            InterpolationColorSpace::Oklaba,
+            InterpolationColorSpace::Oklcha,
+            InterpolationColorSpace::OklchaLong,
+            InterpolationColorSpace::Hsla,
+            InterpolationColorSpace::HslaLong,
+            InterpolationColorSpace::Hsva,
+            InterpolationColorSpace::HsvaLong,
+            InterpolationColorSpace::Okhsla,
+            InterpolationColorSpace::OkhslaLong,
+            InterpolationColorSpace::Srgba,
+            InterpolationColorSpace::LinearRgba,
+        ] {
+            let mesh_space = MeshGradientColorSpace::from(space);
+            assert_eq!(InterpolationColorSpace::from(mesh_space), space);
+            let mut mesh = regular_mesh(2, 2);
+            mesh.try_set_color_space(mesh_space).unwrap();
+            assert_eq!(mesh.color_space(), mesh_space);
+            #[cfg(feature = "serialize")]
+            {
+                let encoded = ron::to_string(&mesh).unwrap();
+                assert_eq!(ron::from_str::<MeshGradient>(&encoded).unwrap(), mesh);
+            }
+            assert!(
+                interpolation_components(Color::hsva(350.0, 0.7, 0.8, 0.5), mesh_space)
+                    .iter()
+                    .all(|component| component.is_finite())
+            );
+        }
     }
 
     #[test]

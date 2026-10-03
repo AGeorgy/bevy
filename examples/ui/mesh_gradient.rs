@@ -620,6 +620,14 @@ fn spawn_inspector(parent: &mut ChildSpawnerCommands, state: &EditorState) {
                         "OKLab",
                         EditorAction::SetColorSpace(MeshGradientColorSpace::Oklaba),
                     ),
+                    button("OKLCH", EditorAction::SetColorSpace(MeshGradientColorSpace::Oklcha)),
+                    button("OKLCH Long", EditorAction::SetColorSpace(MeshGradientColorSpace::OklchaLong)),
+                    button("HSL", EditorAction::SetColorSpace(MeshGradientColorSpace::Hsla)),
+                    button("HSL Long", EditorAction::SetColorSpace(MeshGradientColorSpace::HslaLong)),
+                    button("HSV", EditorAction::SetColorSpace(MeshGradientColorSpace::Hsva)),
+                    button("HSV Long", EditorAction::SetColorSpace(MeshGradientColorSpace::HsvaLong)),
+                    button("OKHSL", EditorAction::SetColorSpace(MeshGradientColorSpace::Okhsla)),
+                    button("OKHSL Long", EditorAction::SetColorSpace(MeshGradientColorSpace::OkhslaLong)),
                 ]
             ),
             (
@@ -659,6 +667,8 @@ fn section_label(label: &'static str) -> impl Bundle {
 fn button_row() -> Node {
     Node {
         flex_direction: FlexDirection::Row,
+        flex_wrap: FlexWrap::Wrap,
+        row_gap: px(7),
         column_gap: px(7),
         ..default()
     }

@@ -12,7 +12,7 @@ use crate::mesh_gradient::{
 };
 use crate::*;
 use bevy_asset::*;
-use bevy_color::{ColorToComponents, Hsla, Hsva, LinearRgba, Okhsla, Oklaba, Oklcha, Srgba};
+use bevy_color::{Color, ColorToComponents, Hsla, Hsva, LinearRgba, Okhsla, Oklaba, Oklcha, Srgba};
 use bevy_ecs::{
     prelude::Component,
     system::{
@@ -21,7 +21,7 @@ use bevy_ecs::{
     },
 };
 use bevy_math::{
-    ops::{cos, sin},
+    ops::{cos, hypot, sin},
     FloatOrd, Rect, Vec2,
 };
 use bevy_math::{Affine2, UVec4, Vec2Swizzles, Vec4};
@@ -45,8 +45,8 @@ use bevy_text::{EmSize, RemSize};
 use bevy_ui::{
     BackgroundGradient, BorderGradient, ColorStop, ComputedStackIndex, ComputedUiRenderTargetInfo,
     ConicGradient, Gradient, InterpolationColorSpace, LinearGradient, MeshGradient,
-    MeshGradientColorInterpolation, MeshGradientGeometry, RadialGradient, ResolvedBorderRadius,
-    Val, MAX_MESH_GRADIENT_DIMENSION,
+    MeshGradientColorInterpolation, MeshGradientColorSpace, MeshGradientGeometry, RadialGradient,
+    ResolvedBorderRadius, Val, MAX_MESH_GRADIENT_DIMENSION,
 };
 use bevy_utils::default;
 use bytemuck::{cast_slice, Pod, Zeroable};
@@ -232,7 +232,15 @@ fn gradient_shader_defs(key: UiGradientPipelineKey) -> Vec<ShaderDefVal> {
         return shader_defs;
     }
 
+    let hue_based = MeshGradientColorSpace::from(key.color_space).is_hue_based();
+    if hue_based {
+        shader_defs.push("HUE_COLOR".into());
+        shader_defs.push("MESH_PARAMETER_UV".into());
+    }
     match key.mesh_color_interpolation {
+        MeshGradientColorInterpolation::Vertex if hue_based => {
+            shader_defs.push("BILINEAR_COLOR".into());
+        }
         MeshGradientColorInterpolation::Vertex => shader_defs.push("VERTEX_COLOR".into()),
         MeshGradientColorInterpolation::Bicubic => {
             shader_defs.push("BICUBIC_COLOR".into());
@@ -386,14 +394,18 @@ impl MeshGradientSurfaceCache {
 }
 
 fn surface_bounds_inputs_match(left: &MeshGradient, right: &MeshGradient) -> bool {
+    let uses_vertex_colors = |mesh: &MeshGradient| {
+        mesh.color_interpolation() == MeshGradientColorInterpolation::Vertex
+            && !mesh.color_space().is_hue_based()
+    };
     left.dimensions() == right.dimensions()
-        && left.color_interpolation() == right.color_interpolation()
+        && uses_vertex_colors(left) == uses_vertex_colors(right)
         && left
             .points()
             .iter()
             .zip(right.points())
             .all(|(left, right)| left.position == right.position)
-        && (left.color_interpolation() != MeshGradientColorInterpolation::Vertex
+        && (!uses_vertex_colors(left)
             || left.color_space() == right.color_space()
                 && left
                     .points()
@@ -1033,7 +1045,11 @@ struct UiGradientVertex {
     hint: f32,
 }
 
-fn convert_color_to_space(color: LinearRgba, space: InterpolationColorSpace) -> [f32; 4] {
+pub(crate) fn convert_color_to_space(
+    color: impl Into<Color>,
+    space: InterpolationColorSpace,
+) -> [f32; 4] {
+    let color = color.into();
     match space {
         InterpolationColorSpace::Oklaba => {
             let oklaba: Oklaba = color.into();
@@ -1062,7 +1078,7 @@ fn convert_color_to_space(color: LinearRgba, space: InterpolationColorSpace) -> 
             let srgba: Srgba = color.into();
             [srgba.red, srgba.green, srgba.blue, srgba.alpha]
         }
-        InterpolationColorSpace::LinearRgba => color.to_f32_array(),
+        InterpolationColorSpace::LinearRgba => color.to_linear().to_f32_array(),
         InterpolationColorSpace::Hsla | InterpolationColorSpace::HslaLong => {
             let hsla: Hsla = color.into();
             // The shader expects normalized hues
@@ -1488,8 +1504,94 @@ fn mesh_gradient_points_uniform(mesh: &MeshGradient) -> MeshGradientPointsUnifor
     for (index, point) in mesh.points().iter().enumerate() {
         positions[index] = point.position.extend(0.0).extend(0.0);
         colors[index] = Vec4::from_array(interpolation_color(mesh, point.color));
+        if matches!(
+            mesh.color_space(),
+            MeshGradientColorSpace::Okhsla | MeshGradientColorSpace::OkhslaLong
+        ) {
+            let lab = Oklaba::from(point.color);
+            positions[index].z = lab.lightness;
+            positions[index].w = hypot(lab.a, lab.b);
+        }
+    }
+    if mesh.color_space().is_hue_based() {
+        unwrap_mesh_hues(
+            &mut colors[..mesh.points().len()],
+            mesh.width(),
+            mesh.color_space(),
+        );
     }
     MeshGradientPointsUniform { positions, colors }
+}
+
+/// Choose one continuous hue field before uploading the control points. A grid
+/// can contain hue cycles, so independently choosing paths on all four edges of
+/// a cell is not always possible. Use a fixed spanning tree: the first column,
+/// followed by each row. Every patch then reads the same lifted control hues.
+fn unwrap_mesh_hues(colors: &mut [Vec4], width: usize, space: MeshGradientColorSpace) {
+    let hue_channel = if matches!(
+        space,
+        MeshGradientColorSpace::Oklcha | MeshGradientColorSpace::OklchaLong
+    ) {
+        2
+    } else {
+        0
+    };
+    // Match the shared shader's saturation/chroma guard. Resolve undefined hues
+    // from the nearest chromatic grid point before choosing winding, so gray
+    // points do not introduce arbitrary hue excursions.
+    let chromatic: Vec<_> = colors
+        .iter()
+        .enumerate()
+        .filter(|(_, color)| color.y >= 0.0001)
+        .map(|(index, color)| (index, color[hue_channel].rem_euclid(1.0)))
+        .collect();
+    for (index, color) in colors.iter_mut().enumerate() {
+        color[hue_channel] = if color.y < 0.0001 {
+            chromatic
+                .iter()
+                .min_by_key(|(other, _)| {
+                    let dx = (index % width).abs_diff(other % width);
+                    let dy = (index / width).abs_diff(other / width);
+                    dx * dx + dy * dy
+                })
+                .map_or(0.0, |(_, hue)| *hue)
+        } else {
+            color[hue_channel].rem_euclid(1.0)
+        };
+    }
+    for index in 1..colors.len() {
+        let previous = if index % width == 0 {
+            index - width
+        } else {
+            index - 1
+        };
+        let start = colors[previous][hue_channel];
+        let difference = colors[index][hue_channel] - start.rem_euclid(1.0);
+        let delta = match space {
+            MeshGradientColorSpace::Hsla | MeshGradientColorSpace::Okhsla => {
+                (difference + 0.5).rem_euclid(1.0) - 0.5
+            }
+            MeshGradientColorSpace::HslaLong | MeshGradientColorSpace::OkhslaLong => {
+                let short = (difference + 0.5).rem_euclid(1.0) - 0.5;
+                short + if short > 0.0 { -1.0 } else { 1.0 }
+            }
+            MeshGradientColorSpace::HsvaLong | MeshGradientColorSpace::OklchaLong => {
+                if difference.abs() < 0.5 {
+                    difference + if difference >= 0.0 { -1.0 } else { 1.0 }
+                } else {
+                    difference
+                }
+            }
+            _ => {
+                if difference.abs() > 0.5 {
+                    difference - difference.signum()
+                } else {
+                    difference
+                }
+            }
+        };
+        colors[index][hue_channel] = start + delta;
+    }
 }
 
 fn mesh_gradient_style_uniform(
@@ -1830,6 +1932,7 @@ mod tests {
     use super::*;
     use bevy_asset::{uuid::Uuid, AssetId};
     use bevy_color::Color;
+    use bevy_math::Vec4Swizzles;
     use bevy_shader::{ShaderCache, ShaderCacheSource};
     use bevy_ui::{CalculatedClipRect, MeshGradientColorSpace, MeshGradientPoint};
     use smallvec::SmallVec;
@@ -1924,6 +2027,14 @@ mod tests {
                 InterpolationColorSpace::LinearRgba,
                 InterpolationColorSpace::Srgba,
                 InterpolationColorSpace::Oklaba,
+                InterpolationColorSpace::Oklcha,
+                InterpolationColorSpace::OklchaLong,
+                InterpolationColorSpace::Hsla,
+                InterpolationColorSpace::HslaLong,
+                InterpolationColorSpace::Hsva,
+                InterpolationColorSpace::HsvaLong,
+                InterpolationColorSpace::Okhsla,
+                InterpolationColorSpace::OkhslaLong,
             ] {
                 for mesh_color_interpolation in [
                     MeshGradientColorInterpolation::Vertex,
@@ -1951,6 +2062,19 @@ mod tests {
                             assert!(compiled.contains("fn vertex"));
                             assert!(compiled.contains("fn fragment"));
                             assert_eq!(compiled.contains("world_point: vec2<f32>"), mesh_clipped);
+                            assert_eq!(
+                                compiled.contains("fn smooth_okhsl_blue"),
+                                matches!(
+                                    color_space,
+                                    InterpolationColorSpace::Okhsla
+                                        | InterpolationColorSpace::OkhslaLong
+                                )
+                            );
+                            assert_eq!(
+                                compiled.contains("interpolation_color: vec4<f32>"),
+                                mesh_color_interpolation == MeshGradientColorInterpolation::Vertex
+                                    && !MeshGradientColorSpace::from(color_space).is_hue_based()
+                            );
                             permutation += 1;
                         }
                     }
@@ -1958,7 +2082,7 @@ mod tests {
             }
         }
 
-        assert_eq!(permutation, 48);
+        assert_eq!(permutation, 176);
     }
 
     #[test]
@@ -2011,6 +2135,18 @@ mod tests {
         left.set_color_interpolation(MeshGradientColorInterpolation::Bicubic);
         right.set_color_interpolation(MeshGradientColorInterpolation::Bicubic);
         assert!(surface_bounds_inputs_match(&left, &right));
+
+        left.set_color_interpolation(MeshGradientColorInterpolation::Vertex);
+        left.try_set_color_space(MeshGradientColorSpace::Hsva)
+            .unwrap();
+        assert!(surface_bounds_inputs_match(&left, &right));
+
+        right.set_color_interpolation(MeshGradientColorInterpolation::Vertex);
+        assert!(!surface_bounds_inputs_match(&left, &right));
+        right
+            .try_set_color_space(MeshGradientColorSpace::HsvaLong)
+            .unwrap();
+        assert!(surface_bounds_inputs_match(&left, &right));
     }
 
     #[test]
@@ -2061,6 +2197,174 @@ mod tests {
             Vec2::ONE
         );
         assert_eq!(points.colors[255], Vec4::new(4.0, 2.0, -0.5, 0.75));
+    }
+
+    #[test]
+    fn mesh_hues_keep_one_winding_across_the_control_grid() {
+        for (space, expected_top_delta) in [
+            (MeshGradientColorSpace::Hsva, 20.0 / 360.0),
+            (MeshGradientColorSpace::HsvaLong, -340.0 / 360.0),
+        ] {
+            let mesh = MeshGradient::new_in_color_space(
+                2,
+                2,
+                [Vec2::ZERO, Vec2::X, Vec2::Y, Vec2::ONE]
+                    .into_iter()
+                    .zip([350.0, 10.0, 240.0, 280.0])
+                    .map(|(position, hue)| {
+                        MeshGradientPoint::new(position, Color::hsva(hue, 1.0, 1.0, 1.0))
+                    })
+                    .collect(),
+                space,
+            )
+            .unwrap();
+            let points = mesh_gradient_points_uniform(&mesh);
+            assert!((points.colors[1].x - points.colors[0].x - expected_top_delta).abs() < 1e-5);
+            for (index, hue) in [350.0, 10.0, 240.0, 280.0].into_iter().enumerate() {
+                assert!((points.colors[index].x.rem_euclid(1.0) - hue / 360.0).abs() < 1e-5);
+            }
+        }
+    }
+
+    #[test]
+    fn continuous_hue_field_avoids_large_center_seams() {
+        for space in [
+            MeshGradientColorSpace::Oklcha,
+            MeshGradientColorSpace::OklchaLong,
+            MeshGradientColorSpace::Hsla,
+            MeshGradientColorSpace::HslaLong,
+            MeshGradientColorSpace::Hsva,
+            MeshGradientColorSpace::HsvaLong,
+            MeshGradientColorSpace::Okhsla,
+            MeshGradientColorSpace::OkhslaLong,
+        ] {
+            let mesh = MeshGradient::new_in_color_space(
+                2,
+                2,
+                [Vec2::ZERO, Vec2::X, Vec2::Y, Vec2::ONE]
+                    .into_iter()
+                    .zip([
+                        Color::srgb(1.0, 0.0, 0.0),
+                        Color::srgb(0.0, 1.0, 0.0),
+                        Color::srgb(0.294, 0.0, 0.51),
+                        Color::srgb(0.0, 0.0, 1.0),
+                    ])
+                    .map(|(position, color)| MeshGradientPoint::new(position, color))
+                    .collect(),
+                space,
+            )
+            .unwrap();
+            let points = mesh_gradient_points_uniform(&mesh);
+            let sample = |u: f32, v: f32| {
+                let value = points.colors[0]
+                    .lerp(points.colors[1], u)
+                    .lerp(points.colors[2].lerp(points.colors[3], u), v);
+                let color = match space {
+                    MeshGradientColorSpace::Oklcha | MeshGradientColorSpace::OklchaLong => {
+                        Color::from(Oklcha::new(
+                            value.x,
+                            value.y,
+                            value.z.rem_euclid(1.0) * 360.0,
+                            value.w,
+                        ))
+                    }
+                    MeshGradientColorSpace::Hsla | MeshGradientColorSpace::HslaLong => Color::from(
+                        Hsla::new(value.x.rem_euclid(1.0) * 360.0, value.y, value.z, value.w),
+                    ),
+                    MeshGradientColorSpace::Hsva | MeshGradientColorSpace::HsvaLong => Color::from(
+                        Hsva::new(value.x.rem_euclid(1.0) * 360.0, value.y, value.z, value.w),
+                    ),
+                    _ => Color::from(Okhsla::new(
+                        value.x.rem_euclid(1.0) * 360.0,
+                        value.y,
+                        value.z,
+                        value.w,
+                    )),
+                };
+                let mut rgb = color.to_linear().to_f32_array();
+                if matches!(
+                    space,
+                    MeshGradientColorSpace::Okhsla | MeshGradientColorSpace::OkhslaLong
+                ) {
+                    let distance = ((value.x - 264.052 / 360.0 + 0.5).rem_euclid(1.0) - 0.5).abs();
+                    if distance < 0.01 {
+                        let t = ((distance - 0.002) / 0.008).clamp(0.0, 1.0);
+                        let weight = 1.0 - t * t * (3.0 - 2.0 * t);
+                        let lc = points.positions[0]
+                            .zw()
+                            .lerp(points.positions[1].zw(), u)
+                            .lerp(
+                                points.positions[2].zw().lerp(points.positions[3].zw(), u),
+                                v,
+                            );
+                        let angle = value.x * TAU;
+                        let smooth = Color::from(Oklaba::new(
+                            lc.x,
+                            lc.y.max(0.0) * cos(angle),
+                            lc.y.max(0.0) * sin(angle),
+                            value.w,
+                        ))
+                        .to_linear()
+                        .to_f32_array();
+                        for (original, fallback) in rgb[..3].iter_mut().zip(smooth) {
+                            *original += (fallback - *original) * weight;
+                        }
+                    }
+                }
+                rgb
+            };
+            if matches!(
+                space,
+                MeshGradientColorSpace::Okhsla | MeshGradientColorSpace::OkhslaLong
+            ) {
+                for (index, (u, v)) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let expected = mesh.points()[index].color.to_linear().to_f32_array();
+                    for (actual, expected) in sample(u, v).into_iter().zip(expected) {
+                        assert!(
+                            (actual - expected).abs() < 0.003,
+                            "{space:?} changes control point {index}"
+                        );
+                    }
+                }
+            }
+            // A subpixel move must not switch hue paths or produce a visible
+            // color jump, including at the saturated-blue gamut cusp.
+            for row in 0..=128 {
+                for column in 1..128 {
+                    let u = column as f32 / 128.0;
+                    let v = row as f32 / 128.0;
+                    let field = |u: f32| {
+                        points.colors[0]
+                            .lerp(points.colors[1], u)
+                            .lerp(points.colors[2].lerp(points.colors[3], u), v)
+                    };
+                    let hue_channel = if matches!(
+                        space,
+                        MeshGradientColorSpace::Oklcha | MeshGradientColorSpace::OklchaLong
+                    ) {
+                        2
+                    } else {
+                        0
+                    };
+                    assert!(
+                        (field(u - 0.000001)[hue_channel] - field(u + 0.000001)[hue_channel]).abs()
+                            < 0.0001
+                    );
+                    let before = sample(u - 0.000001, v);
+                    let after = sample(u + 0.000001, v);
+                    for (a, b) in before.into_iter().zip(after) {
+                        assert!(a.is_finite() && b.is_finite());
+                        assert!(
+                            (a - b).abs() < 0.001,
+                            "{space:?} jumps at ({u}, {v}): {a} -> {b}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -2,17 +2,18 @@
 //! screen axes, including node size, transform and display scale exactly once.
 //!
 //! Geometry uses patch-local Hessian remainder bounds for linear triangular
-//! interpolation. Color is evaluated either at tessellation vertices or from a
-//! bicubic surface in the fragment shader. Each patch has independent
+//! interpolation. Cartesian colors are evaluated at tessellation vertices;
+//! hue-based bilinear colors and bicubic colors are evaluated per fragment.
+//! Each patch has independent
 //! power-of-two factors; finer boundary vertices snap to the coarser edge
 //! approximation so neighboring patches remain crack-free without propagating
 //! refinement. Vertex color mode adds an exact bilinear color-error term, so it
 //! spends triangles only where the rasterizer would reveal a patch diagonal.
 
-use bevy_color::{Color, ColorToComponents, LinearRgba, Oklaba, Srgba};
+use bevy_color::Color;
 use bevy_math::{DVec2, Mat2, Vec2};
 use bevy_platform::{collections::HashMap, sync::Arc};
-use bevy_ui::{MeshGradient, MeshGradientColorInterpolation, MeshGradientColorSpace};
+use bevy_ui::{MeshGradient, MeshGradientColorInterpolation};
 use bytemuck::{Pod, Zeroable};
 use smallvec::SmallVec;
 
@@ -28,11 +29,7 @@ const MAX_SUBDIVISIONS: usize = 64;
 const DEMOTION_FRAMES: u8 = 8;
 
 pub(crate) fn interpolation_color(mesh: &MeshGradient, color: Color) -> [f32; 4] {
-    match mesh.color_space() {
-        MeshGradientColorSpace::LinearRgba => LinearRgba::from(color).to_f32_array(),
-        MeshGradientColorSpace::Srgba => Srgba::from(color).to_f32_array(),
-        MeshGradientColorSpace::Oklaba => Oklaba::from(color).to_f32_array(),
-    }
+    crate::gradient::convert_color_to_space(color, mesh.color_space().into())
 }
 
 #[cfg(test)]
@@ -552,13 +549,15 @@ impl SurfaceBounds {
             .iter()
             .map(|point| point.position.as_dvec2().to_array())
             .collect();
-        let colors: Option<SmallVec<[[f64; 4]; 16]>> =
-            (mesh.color_interpolation() == MeshGradientColorInterpolation::Vertex).then(|| {
-                mesh.points()
-                    .iter()
-                    .map(|point| interpolation_color(mesh, point.color).map(f64::from))
-                    .collect()
-            });
+        let colors: Option<SmallVec<[[f64; 4]; 16]>> = (mesh.color_interpolation()
+            == MeshGradientColorInterpolation::Vertex
+            && !mesh.color_space().is_hue_based())
+        .then(|| {
+            mesh.points()
+                .iter()
+                .map(|point| interpolation_color(mesh, point.color).map(f64::from))
+                .collect()
+        });
         let interval_patches: SmallVec<[IntervalPatch<2>; 9]> =
             build_interval_patches(&values, width, height);
         let patches = interval_patches
@@ -1004,20 +1003,14 @@ where
 mod tests {
     use super::*;
     use bevy_math::Vec2;
-    use bevy_ui::{MeshGradientGeometry, MeshGradientPoint};
+    use bevy_ui::{MeshGradientColorSpace, MeshGradientGeometry, MeshGradientPoint};
 
     fn interval_patches(mesh: &MeshGradient) -> SmallVec<[IntervalPatch<6>; 9]> {
         let values: SmallVec<[Point; 16]> = mesh
             .points()
             .iter()
             .map(|point| {
-                let color = match mesh.color_space() {
-                    MeshGradientColorSpace::LinearRgba => {
-                        LinearRgba::from(point.color).to_f32_array()
-                    }
-                    MeshGradientColorSpace::Srgba => Srgba::from(point.color).to_f32_array(),
-                    MeshGradientColorSpace::Oklaba => Oklaba::from(point.color).to_f32_array(),
-                };
+                let color = interpolation_color(mesh, point.color);
                 [
                     point.position.x as f64,
                     point.position.y as f64,
@@ -1102,13 +1095,7 @@ mod tests {
         mesh.points()
             .iter()
             .map(|point| {
-                let color = match mesh.color_space() {
-                    MeshGradientColorSpace::LinearRgba => {
-                        LinearRgba::from(point.color).to_f32_array()
-                    }
-                    MeshGradientColorSpace::Srgba => Srgba::from(point.color).to_f32_array(),
-                    MeshGradientColorSpace::Oklaba => Oklaba::from(point.color).to_f32_array(),
-                };
+                let color = interpolation_color(mesh, point.color);
                 [
                     point.position.x,
                     point.position.y,
@@ -1326,6 +1313,31 @@ mod tests {
                     .maximum_subdivisions(),
                 MIN_SUBDIVISIONS
             );
+        }
+    }
+
+    #[test]
+    fn hue_color_paths_use_normalized_transport_and_geometry_only_tessellation() {
+        for space in [
+            MeshGradientColorSpace::Hsva,
+            MeshGradientColorSpace::HsvaLong,
+        ] {
+            let mut grid = mesh(2, 0.0, 1.0, space);
+            for hue in [10.0, 350.0] {
+                let color = interpolation_color(&grid, Color::hsva(hue, 0.7, 0.8, 0.5));
+                for (actual, expected) in color.into_iter().zip([hue / 360.0, 0.7, 0.8, 0.5]) {
+                    assert!((actual - expected).abs() < 1e-5);
+                }
+            }
+            let before = SurfaceBounds::new(&grid);
+            let before = QualityState::default().update(&before, axes(4096.0));
+            grid.try_set_color(0, Color::hsva(350.0, 1.0, 1.0, 1.0))
+                .unwrap();
+            let after = SurfaceBounds::new(&grid);
+            let after = QualityState::default().update(&after, axes(4096.0));
+            assert_eq!(before.key, after.key);
+            assert_eq!(after.key.maximum_subdivisions(), MIN_SUBDIVISIONS);
+            assert_eq!(after.error.color, 0.0);
         }
     }
 

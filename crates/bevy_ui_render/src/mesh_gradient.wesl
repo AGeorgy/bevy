@@ -4,6 +4,8 @@ import package::ui::{
     uinode_border_coverage,
 };
 import package::gradient_color::convert_to_linear_rgba;
+import bevy_render::color_operations::oklab_to_linear_rgb;
+import bevy_render::maths::PI_2;
 
 const MAX_POINTS: u32 = 256u;
 const MAX_CLIPS: u32 = 128u;
@@ -42,7 +44,7 @@ struct MeshVertexOutput {
     @location(0) uv: vec2<f32>,
     @if(VERTEX_COLOR)
     @location(1) interpolation_color: vec4<f32>,
-    @if(BICUBIC_COLOR)
+    @if(BICUBIC_COLOR || HUE_COLOR)
     @location(1) @interpolate(flat) patch_index: vec2<u32>,
     @location(2) local_point: vec2<f32>,
     @if(MESH_CLIPPED)
@@ -88,12 +90,94 @@ fn control_position(x: i32, y: i32) -> vec2<f32> {
     return position_in_row(x, u32(y));
 }
 
+// Control hues are lifted onto a consistent, unwrapped field before upload.
+// Interpolate that field normally and wrap once at the final RGB conversion.
+@if(HUE_COLOR)
+fn wrap_mesh_hue(color: vec4<f32>) -> vec4<f32> {
+@if(IN_OKLCH || IN_OKLCH_LONG)
+    return vec4(color.xy, fract(color.z), color.a);
+@else
+    return vec4(fract(color.x), color.yzw);
+}
+
+@if(IN_OKHSL || IN_OKHSL_LONG)
+fn fallback_lc(patch_index: vec2<u32>, uv: vec2<f32>) -> vec2<f32> {
+    let x = patch_index.x;
+    let y = patch_index.y;
+@if(BILINEAR_COLOR) {
+    let top = mix(points.positions[point_index(x, y)].zw,
+        points.positions[point_index(x + 1u, y)].zw, uv.x);
+    let bottom = mix(points.positions[point_index(x, y + 1u)].zw,
+        points.positions[point_index(x + 1u, y + 1u)].zw, uv.x);
+    return mix(top, bottom, uv.y);
+} @else {
+    let u_weights = cubic_weights(uv.x);
+    let v_weights = cubic_weights(uv.y);
+    let ix = i32(x);
+    let iy = i32(y);
+    let row0 = cubic2(control_lc(ix - 1, iy - 1), control_lc(ix, iy - 1),
+        control_lc(ix + 1, iy - 1), control_lc(ix + 2, iy - 1), u_weights);
+    let row1 = cubic2(control_lc(ix - 1, iy), control_lc(ix, iy),
+        control_lc(ix + 1, iy), control_lc(ix + 2, iy), u_weights);
+    let row2 = cubic2(control_lc(ix - 1, iy + 1), control_lc(ix, iy + 1),
+        control_lc(ix + 1, iy + 1), control_lc(ix + 2, iy + 1), u_weights);
+    let row3 = cubic2(control_lc(ix - 1, iy + 2), control_lc(ix, iy + 2),
+        control_lc(ix + 1, iy + 2), control_lc(ix + 2, iy + 2), u_weights);
+    return cubic2(row0, row1, row2, row3, v_weights);
+}
+}
+
+@if(IN_OKHSL || IN_OKHSL_LONG)
+fn smooth_okhsl_blue(patch_index: vec2<u32>, uv: vec2<f32>, color: vec4<f32>, rgb: vec3<f32>) -> vec3<f32> {
+    // OKHSL's gamut intersection switches roots at saturated blue. The local
+    // Oklab surface keeps the colored points exact and bridges that narrow cusp.
+    let distance = abs(fract(color.x - 264.052 / 360.0 + 0.5) - 0.5);
+    if distance >= 0.01 {
+        return rgb;
+    }
+    let lc = fallback_lc(patch_index, uv);
+    let angle = color.x * PI_2;
+    let chroma = max(lc.y, 0.0);
+    let smooth_rgb = oklab_to_linear_rgb(vec3(lc.x, chroma * cos(angle), chroma * sin(angle)));
+    if distance <= 0.002 {
+        return smooth_rgb;
+    }
+    let weight = 1.0 - smoothstep(0.002, 0.01, distance);
+    return mix(rgb, smooth_rgb, weight);
+}
+
+@if(BICUBIC_COLOR && (IN_OKHSL || IN_OKHSL_LONG))
+fn fallback_lc_in_row(x: i32, y: u32) -> vec2<f32> {
+    let width = i32(mesh.metadata.x);
+    if x < 0 {
+        return 2.0 * points.positions[point_index(0u, y)].zw
+            - points.positions[point_index(1u, y)].zw;
+    }
+    if x >= width {
+        return 2.0 * points.positions[point_index(u32(width - 1), y)].zw
+            - points.positions[point_index(u32(width - 2), y)].zw;
+    }
+    return points.positions[point_index(u32(x), y)].zw;
+}
+
+@if(BICUBIC_COLOR && (IN_OKHSL || IN_OKHSL_LONG))
+fn control_lc(x: i32, y: i32) -> vec2<f32> {
+    let height = i32(mesh.metadata.y);
+    if y < 0 {
+        return 2.0 * fallback_lc_in_row(x, 0u) - fallback_lc_in_row(x, 1u);
+    }
+    if y >= height {
+        return 2.0 * fallback_lc_in_row(x, u32(height - 1))
+            - fallback_lc_in_row(x, u32(height - 2));
+    }
+    return fallback_lc_in_row(x, u32(y));
+}
+
 @if(BICUBIC_COLOR)
 fn color_in_row(x: i32, y: u32) -> vec4<f32> {
     let width = i32(mesh.metadata.x);
     if x < 0 {
-        return 2.0 * points.colors[point_index(0u, y)]
-            - points.colors[point_index(1u, y)];
+        return 2.0 * points.colors[point_index(0u, y)] - points.colors[point_index(1u, y)];
     }
     if x >= width {
         return 2.0 * points.colors[point_index(u32(width - 1), y)]
@@ -109,8 +193,7 @@ fn control_color(x: i32, y: i32) -> vec4<f32> {
         return 2.0 * color_in_row(x, 0u) - color_in_row(x, 1u);
     }
     if y >= height {
-        return 2.0 * color_in_row(x, u32(height - 1))
-            - color_in_row(x, u32(height - 2));
+        return 2.0 * color_in_row(x, u32(height - 1)) - color_in_row(x, u32(height - 2));
     }
     return color_in_row(x, u32(y));
 }
@@ -224,7 +307,7 @@ fn snapped_surface_position(
     );
 }
 
-@if(VERTEX_COLOR)
+@if(VERTEX_COLOR || BILINEAR_COLOR)
 fn bilinear_surface_color(patch_index: vec2<u32>, uv: vec2<f32>) -> vec4<f32> {
     let x = patch_index.x;
     let y = patch_index.y;
@@ -306,7 +389,7 @@ fn vertex(
     out.uv = uv;
 @if(VERTEX_COLOR)
     out.interpolation_color = bilinear_surface_color(patch_index, uv);
-@if(BICUBIC_COLOR)
+@if(BICUBIC_COLOR || HUE_COLOR)
     out.patch_index = patch_index;
     out.local_point = local_point;
 @if(MESH_CLIPPED)
@@ -359,9 +442,15 @@ fn fragment(in: MeshVertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 @if(VERTEX_COLOR)
-    let interpolation_color = in.interpolation_color;
+    let field_color = in.interpolation_color;
+@if(BILINEAR_COLOR)
+    let field_color = bilinear_surface_color(in.patch_index, in.uv);
 @if(BICUBIC_COLOR)
-    let interpolation_color = bicubic_surface_color(in.patch_index, in.uv);
+    let field_color = bicubic_surface_color(in.patch_index, in.uv);
+@if(HUE_COLOR)
+    let interpolation_color = wrap_mesh_hue(field_color);
+@else
+    let interpolation_color = field_color;
 @if(VERTEX_COLOR && IN_LINEAR_RGB)
     let color = interpolation_color;
 @else
@@ -370,5 +459,9 @@ fn fragment(in: MeshVertexOutput) -> @location(0) vec4<f32> {
     let alpha = color.a;
 @else
     let alpha = clamp(color.a, 0.0, 1.0);
-    return vec4(color.rgb, saturate(alpha * coverage));
+@if(IN_OKHSL || IN_OKHSL_LONG)
+    let rgb = smooth_okhsl_blue(in.patch_index, in.uv, interpolation_color, color.rgb);
+@else
+    let rgb = color.rgb;
+    return vec4(rgb, saturate(alpha * coverage));
 }

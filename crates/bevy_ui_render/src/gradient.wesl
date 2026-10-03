@@ -3,19 +3,7 @@ import package::ui::{
     draw_uinode_background,
     draw_uinode_border,
 };
-import package::gradient_color::convert_to_linear_rgba;
-
-import bevy_render::color_operations::{
-    mix_oklch,
-    mix_oklch_long,
-    mix_hsv,
-    mix_hsv_long,
-    mix_hsl,
-    mix_hsl_long,
-    mix_okhsl,
-    mix_okhsl_long,
-};
-
+import package::gradient_color::{convert_to_linear_rgba, mix_colors};
 import bevy_render::maths::PI;
 
 const TAU: f32 = 2. * PI;
@@ -163,32 +151,6 @@ fn conic_distance(
     return (((angle - start) % TAU) + TAU) % TAU;
 }
 
-/// Mix the colors, choosing the appropriate interpolation method for the given color space
-fn mix_colors(
-    start_color: vec3<f32>,
-    end_color: vec3<f32>,
-    t: f32,
-) -> vec3<f32> {
-@if(IN_OKLCH)
-    return mix_oklch(start_color, end_color, t);
-@elif(IN_OKLCH_LONG)
-    return mix_oklch_long(start_color, end_color, t);
-@elif(IN_HSV)
-    return mix_hsv(start_color, end_color, t);
-@elif(IN_HSV_LONG)
-    return mix_hsv_long(start_color, end_color, t);
-@elif(IN_HSL)
-    return mix_hsl(start_color, end_color, t);
-@elif(IN_HSL_LONG)
-    return mix_hsl_long(start_color, end_color, t);
-@elif(IN_OKHSL)
-    return mix_okhsl(start_color, end_color, t);
-@elif(IN_OKHSL_LONG)
-    return mix_okhsl_long(start_color, end_color, t);
-@else
-    // Just lerp in linear RGBA, OkLab and SRGBA spaces
-    return mix(start_color, end_color, t);
-}
 
 fn interpolate_gradient(
     distance: f32,
