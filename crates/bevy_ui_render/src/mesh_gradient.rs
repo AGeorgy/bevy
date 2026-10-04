@@ -583,9 +583,7 @@ impl SurfaceBounds {
         .then(|| {
             mesh.points()
                 .iter()
-                .map(|point| {
-                    convert_color_to_space(point.color, mesh.color_space().into()).map(f64::from)
-                })
+                .map(|point| convert_color_to_space(point.color, mesh.color_space()).map(f64::from))
                 .collect()
         });
         let interval_patches: SmallVec<[IntervalPatch<2>; 9]> =
@@ -1052,7 +1050,7 @@ mod tests {
     use super::*;
     use bevy_color::Color;
     use bevy_math::Vec2;
-    use bevy_ui::{MeshGradientColorSpace, MeshGradientGeometry, MeshGradientPoint};
+    use bevy_ui::{InterpolationColorSpace, MeshGradientGeometry, MeshGradientPoint};
 
     fn create_surface_bounds(mesh: &MeshGradient) -> Arc<SurfaceBounds> {
         Arc::new(SurfaceBounds::new(mesh))
@@ -1063,7 +1061,7 @@ mod tests {
             .points()
             .iter()
             .map(|point| {
-                let color = convert_color_to_space(point.color, mesh.color_space().into());
+                let color = convert_color_to_space(point.color, mesh.color_space());
                 [
                     point.position.x as f64,
                     point.position.y as f64,
@@ -1088,7 +1086,7 @@ mod tests {
         size: usize,
         displacement: f32,
         contrast: f32,
-        space: MeshGradientColorSpace,
+        space: InterpolationColorSpace,
     ) -> MeshGradient {
         let mut points = Vec::new();
         for y in 0..size {
@@ -1108,7 +1106,7 @@ mod tests {
 
     fn create_checkerboard_mesh(
         contrast: f32,
-        space: MeshGradientColorSpace,
+        space: InterpolationColorSpace,
         interpolation: MeshGradientColorInterpolation,
     ) -> MeshGradient {
         let points = [
@@ -1148,7 +1146,7 @@ mod tests {
         mesh.points()
             .iter()
             .map(|point| {
-                let color = convert_color_to_space(point.color, mesh.color_space().into());
+                let color = convert_color_to_space(point.color, mesh.color_space());
                 [
                     point.position.x,
                     point.position.y,
@@ -1267,9 +1265,9 @@ mod tests {
     #[test]
     fn shader_f32_surface_agrees_with_cpu_reference_and_shares_exact_edges() {
         for space in [
-            MeshGradientColorSpace::LinearRgba,
-            MeshGradientColorSpace::Srgba,
-            MeshGradientColorSpace::Oklaba,
+            InterpolationColorSpace::LinearRgba,
+            InterpolationColorSpace::Srgba,
+            InterpolationColorSpace::Oklaba,
         ] {
             for size in [2, 3, 16] {
                 let grid = create_test_mesh(size, 0.02 / (size - 1) as f32, 4.0, space);
@@ -1330,7 +1328,7 @@ mod tests {
             2,
             0.0,
             1.0,
-            MeshGradientColorSpace::LinearRgba,
+            InterpolationColorSpace::LinearRgba,
         ));
         assert_eq!(
             QualityState::default()
@@ -1343,7 +1341,7 @@ mod tests {
             3,
             0.04,
             1.0,
-            MeshGradientColorSpace::LinearRgba,
+            InterpolationColorSpace::LinearRgba,
         ));
         let mut state = QualityState::default();
         let small = state.update(&curved, create_screen_axes(256.0));
@@ -1356,9 +1354,9 @@ mod tests {
     #[test]
     fn vertex_color_error_refines_only_resolvable_mixed_color() {
         for space in [
-            MeshGradientColorSpace::LinearRgba,
-            MeshGradientColorSpace::Srgba,
-            MeshGradientColorSpace::Oklaba,
+            InterpolationColorSpace::LinearRgba,
+            InterpolationColorSpace::Srgba,
+            InterpolationColorSpace::Oklaba,
         ] {
             let vivid = create_surface_bounds(&create_checkerboard_mesh(
                 1.0,
@@ -1404,15 +1402,13 @@ mod tests {
     #[test]
     fn hue_color_paths_use_normalized_transport_and_geometry_only_tessellation() {
         for space in [
-            MeshGradientColorSpace::Hsva,
-            MeshGradientColorSpace::HsvaLong,
+            InterpolationColorSpace::Hsva,
+            InterpolationColorSpace::HsvaLong,
         ] {
             let mut grid = create_test_mesh(2, 0.0, 1.0, space);
             for hue in [10.0, 350.0] {
-                let color = convert_color_to_space(
-                    Color::hsva(hue, 0.7, 0.8, 0.5),
-                    grid.color_space().into(),
-                );
+                let color =
+                    convert_color_to_space(Color::hsva(hue, 0.7, 0.8, 0.5), grid.color_space());
                 for (actual, expected) in color.into_iter().zip([hue / 360.0, 0.7, 0.8, 0.5]) {
                     assert!((actual - expected).abs() < 1e-5);
                 }
@@ -1435,9 +1431,9 @@ mod tests {
             compute_physical_axes(Vec2::splat(256.0), Mat2::IDENTITY),
             create_screen_axes(256.0)
         );
-        let mut quiet_mesh = create_test_mesh(3, 0.04, 0.0, MeshGradientColorSpace::LinearRgba);
+        let mut quiet_mesh = create_test_mesh(3, 0.04, 0.0, InterpolationColorSpace::LinearRgba);
         quiet_mesh.set_color_interpolation(MeshGradientColorInterpolation::Bicubic);
-        let mut vivid_mesh = create_test_mesh(3, 0.04, 8.0, MeshGradientColorSpace::LinearRgba);
+        let mut vivid_mesh = create_test_mesh(3, 0.04, 8.0, InterpolationColorSpace::LinearRgba);
         vivid_mesh.set_color_interpolation(MeshGradientColorInterpolation::Bicubic);
         let quiet = create_surface_bounds(&quiet_mesh);
         let vivid = create_surface_bounds(&vivid_mesh);
@@ -1477,13 +1473,13 @@ mod tests {
             3,
             0.04,
             0.0,
-            MeshGradientColorSpace::LinearRgba,
+            InterpolationColorSpace::LinearRgba,
         ));
         let flat = create_surface_bounds(&create_test_mesh(
             3,
             0.0,
             0.0,
-            MeshGradientColorSpace::LinearRgba,
+            InterpolationColorSpace::LinearRgba,
         ));
         let mut state = QualityState::default();
         let high = state.update(&curved, create_screen_axes(4096.0)).key;
@@ -1533,7 +1529,7 @@ mod tests {
 
         let mut cached = QualityState::default();
         let mut rebuilt = QualityState::default();
-        let mut checker = create_test_mesh(16, 0.0, 0.0, MeshGradientColorSpace::LinearRgba);
+        let mut checker = create_test_mesh(16, 0.0, 0.0, InterpolationColorSpace::LinearRgba);
         checker
             .try_edit_points(|points| {
                 for (index, point) in points.iter_mut().enumerate() {
@@ -1571,7 +1567,7 @@ mod tests {
             &mut rebuilt,
         );
 
-        let curved = create_test_mesh(3, 0.1, 0.0, MeshGradientColorSpace::LinearRgba);
+        let curved = create_test_mesh(3, 0.1, 0.0, InterpolationColorSpace::LinearRgba);
         compare_frames(
             &curved,
             create_screen_axes(4096.0),
@@ -1588,14 +1584,14 @@ mod tests {
         );
         assert_eq!(demoted.key.find_maximum_subdivisions(), MIN_SUBDIVISIONS);
 
-        let cap = create_test_mesh(16, 0.005, 1.0, MeshGradientColorSpace::LinearRgba);
+        let cap = create_test_mesh(16, 0.005, 1.0, InterpolationColorSpace::LinearRgba);
         let capped = compare_frames(&cap, create_screen_axes(1e10), 1, &mut cached, &mut rebuilt);
         assert!(capped.report_cap);
         assert!(!capped.error.meets_tolerance(GEOMETRY_LIMIT, 1.0));
         let stable_cap =
             compare_frames(&cap, create_screen_axes(1e10), 3, &mut cached, &mut rebuilt);
         assert!(!stable_cap.report_cap);
-        let flat = create_test_mesh(2, 0.0, 0.0, MeshGradientColorSpace::LinearRgba);
+        let flat = create_test_mesh(2, 0.0, 0.0, InterpolationColorSpace::LinearRgba);
         compare_frames(&flat, create_screen_axes(1.0), 1, &mut cached, &mut rebuilt);
         let early = compare_frames(&cap, create_screen_axes(1e10), 1, &mut cached, &mut rebuilt);
         assert!(!early.report_cap);
@@ -1654,7 +1650,7 @@ mod tests {
 
     #[test]
     fn alpha_alone_does_not_promote_geometry_quality() {
-        let mut grid = create_test_mesh(3, 0.02, 0.0, MeshGradientColorSpace::LinearRgba);
+        let mut grid = create_test_mesh(3, 0.02, 0.0, InterpolationColorSpace::LinearRgba);
         let quiet =
             QualityState::default().update(&create_surface_bounds(&grid), create_screen_axes(1.0));
         grid.try_edit_points(|points| {
@@ -1675,7 +1671,7 @@ mod tests {
             16,
             0.005,
             1.0,
-            MeshGradientColorSpace::LinearRgba,
+            InterpolationColorSpace::LinearRgba,
         ));
         let mut state = QualityState::default();
         let selection = state.update(&bounds, create_screen_axes(1e10));
@@ -1690,7 +1686,7 @@ mod tests {
 
     #[test]
     fn hdr_color_changes_reuse_geometry_topology() {
-        let mut hdr = create_test_mesh(3, 0.02, 1.0, MeshGradientColorSpace::LinearRgba);
+        let mut hdr = create_test_mesh(3, 0.02, 1.0, InterpolationColorSpace::LinearRgba);
         hdr.try_edit_points(|points| {
             for point in points {
                 let p = point.position;
@@ -1708,7 +1704,7 @@ mod tests {
                     3,
                     0.02,
                     1.0,
-                    MeshGradientColorSpace::LinearRgba,
+                    InterpolationColorSpace::LinearRgba,
                 )),
                 create_screen_axes(4096.0),
             )
@@ -1718,13 +1714,13 @@ mod tests {
 
     #[test]
     fn point_edits_reuse_selected_topology_and_grid_changes_reset_state() {
-        let mut grid = create_test_mesh(3, 0.02, 1.0, MeshGradientColorSpace::LinearRgba);
+        let mut grid = create_test_mesh(3, 0.02, 1.0, InterpolationColorSpace::LinearRgba);
         let mut state = QualityState::default();
         let first = state.update(&create_surface_bounds(&grid), create_screen_axes(512.0));
         grid.try_set_position(4, Vec2::new(0.52001, 0.5)).unwrap();
         let next = state.update(&create_surface_bounds(&grid), create_screen_axes(512.0));
         assert_eq!(first.key, next.key);
-        let replacement = create_test_mesh(16, 0.0, 1.0, MeshGradientColorSpace::LinearRgba);
+        let replacement = create_test_mesh(16, 0.0, 1.0, InterpolationColorSpace::LinearRgba);
         let changed = state.update(
             &create_surface_bounds(&replacement),
             create_screen_axes(512.0),
@@ -1859,7 +1855,7 @@ mod tests {
             5,
             4,
             points,
-            MeshGradientColorSpace::Oklaba,
+            InterpolationColorSpace::Oklaba,
             MeshGradientGeometry::AllowFolds,
         )
         .unwrap();
@@ -2012,7 +2008,7 @@ mod tests {
                 1.0 - 2.0 * t * t + t * t * t
             }
         }
-        let mesh = create_test_mesh(3, 0.1, 0.0, MeshGradientColorSpace::LinearRgba);
+        let mesh = create_test_mesh(3, 0.1, 0.0, InterpolationColorSpace::LinearRgba);
         let displacement = f64::from(mesh.points()[4].position.x) - 0.5;
         for (index, patch) in build_reference_patches(&mesh).into_iter().enumerate() {
             let column = index % 2;
@@ -2036,7 +2032,7 @@ mod tests {
 
     #[test]
     fn physical_size_is_independent_of_display_scale_and_respects_pixel_error() {
-        let mesh = create_test_mesh(3, 0.1, 0.0, MeshGradientColorSpace::LinearRgba);
+        let mesh = create_test_mesh(3, 0.1, 0.0, InterpolationColorSpace::LinearRgba);
         let bounds = create_surface_bounds(&mesh);
         let offsets: Vec<_> = (1..20)
             .flat_map(|y| (1..20).map(move |x| DVec2::new(x as f64 / 20.0, y as f64 / 20.0)))
@@ -2071,7 +2067,7 @@ mod tests {
                 size,
                 0.04 / (size - 1) as f32,
                 1.0,
-                MeshGradientColorSpace::LinearRgba,
+                InterpolationColorSpace::LinearRgba,
             );
             let bounds = create_surface_bounds(&grid);
             for screen in [256.0, 1024.0, 4096.0] {

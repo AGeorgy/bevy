@@ -70,45 +70,6 @@ impl MeshGradientPoint {
     }
 }
 
-/// A color space supported by mesh-gradient interpolation.
-///
-/// Supports the same color spaces and hue paths as other UI gradients. All
-/// variants interpolate alpha separately from the color coordinates.
-#[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Hash, Reflect)]
-#[reflect(Default, Clone, PartialEq, Debug, Hash)]
-#[cfg_attr(
-    feature = "serialize",
-    derive(serde::Serialize, serde::Deserialize),
-    reflect(Serialize, Deserialize)
-)]
-pub enum MeshGradientColorSpace {
-    /// Interpolate in `OKLab` for perceptually smoother transitions.
-    Oklaba,
-    /// Interpolate in OKLCH along the shorter hue path.
-    Oklcha,
-    /// Interpolate in OKLCH along the longer hue path.
-    OklchaLong,
-    /// Interpolate in HSL along the shorter hue path.
-    Hsla,
-    /// Interpolate in HSL along the longer hue path.
-    HslaLong,
-    /// Interpolate in HSV along the shorter hue path.
-    Hsva,
-    /// Interpolate in HSV along the longer hue path.
-    HsvaLong,
-    /// Interpolate in OKHSL along the shorter hue path.
-    Okhsla,
-    /// Interpolate in OKHSL along the longer hue path.
-    OkhslaLong,
-    /// Interpolate in sRGB.
-    Srgba,
-    /// Interpolate in linear RGB. This is the fastest option because the
-    /// fragment shader does not need a color-space conversion. This is the
-    /// default.
-    #[default]
-    LinearRgba,
-}
-
 /// Controls how mesh-gradient colors are evaluated.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Hash, Reflect)]
 #[reflect(Default, Clone, PartialEq, Debug, Hash)]
@@ -149,49 +110,6 @@ pub enum MeshGradientGeometry {
     /// omits locally reversed triangles so a folded layer does not cover the
     /// forward-facing surface with a narrow overlap artifact.
     AllowFolds,
-}
-
-impl MeshGradientColorSpace {
-    /// Whether interpolation follows a circular hue coordinate.
-    pub const fn is_hue_based(self) -> bool {
-        !matches!(self, Self::Oklaba | Self::Srgba | Self::LinearRgba)
-    }
-}
-
-impl From<MeshGradientColorSpace> for InterpolationColorSpace {
-    fn from(value: MeshGradientColorSpace) -> Self {
-        match value {
-            MeshGradientColorSpace::Oklaba => Self::Oklaba,
-            MeshGradientColorSpace::Oklcha => Self::Oklcha,
-            MeshGradientColorSpace::OklchaLong => Self::OklchaLong,
-            MeshGradientColorSpace::Hsla => Self::Hsla,
-            MeshGradientColorSpace::HslaLong => Self::HslaLong,
-            MeshGradientColorSpace::Hsva => Self::Hsva,
-            MeshGradientColorSpace::HsvaLong => Self::HsvaLong,
-            MeshGradientColorSpace::Okhsla => Self::Okhsla,
-            MeshGradientColorSpace::OkhslaLong => Self::OkhslaLong,
-            MeshGradientColorSpace::Srgba => Self::Srgba,
-            MeshGradientColorSpace::LinearRgba => Self::LinearRgba,
-        }
-    }
-}
-
-impl From<InterpolationColorSpace> for MeshGradientColorSpace {
-    fn from(value: InterpolationColorSpace) -> Self {
-        match value {
-            InterpolationColorSpace::Oklaba => Self::Oklaba,
-            InterpolationColorSpace::Oklcha => Self::Oklcha,
-            InterpolationColorSpace::OklchaLong => Self::OklchaLong,
-            InterpolationColorSpace::Hsla => Self::Hsla,
-            InterpolationColorSpace::HslaLong => Self::HslaLong,
-            InterpolationColorSpace::Hsva => Self::Hsva,
-            InterpolationColorSpace::HsvaLong => Self::HsvaLong,
-            InterpolationColorSpace::Okhsla => Self::Okhsla,
-            InterpolationColorSpace::OkhslaLong => Self::OkhslaLong,
-            InterpolationColorSpace::Srgba => Self::Srgba,
-            InterpolationColorSpace::LinearRgba => Self::LinearRgba,
-        }
-    }
 }
 
 /// An error returned when constructing or editing a [`MeshGradient`].
@@ -333,7 +251,7 @@ pub enum MeshGradientError {
 /// Interpolation-space limits reserve room for nonlinear RGB conversion after
 /// interpolation; ordinary HDR colors remain supported.
 /// Colors interpolate in linear RGB by default; all UI gradient spaces are
-/// available through [`MeshGradientColorSpace`]. Near saturated blue, OKHSL
+/// available through [`InterpolationColorSpace`]. Near saturated blue, OKHSL
 /// meshes blend toward an Oklab surface derived from the same colored points
 /// to avoid a gamut discontinuity while keeping colors in OKHSL's unit domain
 /// intact. Derived OKHSL saturation is clamped to `[0, 1]` before RGB conversion.
@@ -372,14 +290,13 @@ pub struct MeshGradient {
     width: usize,
     height: usize,
     points: Vec<MeshGradientPoint>,
-    color_space: MeshGradientColorSpace,
+    color_space: InterpolationColorSpace,
     color_interpolation: MeshGradientColorInterpolation,
     geometry: MeshGradientGeometry,
 }
 
 impl MeshGradient {
-    /// Creates a checked mesh gradient in the default mesh-gradient color
-    /// space.
+    /// Creates a checked mesh gradient in linear RGB.
     ///
     /// `points` must contain `width * height` values in row-major order. This
     /// uses [`MeshGradientGeometry::NonFolding`].
@@ -393,7 +310,7 @@ impl MeshGradient {
         height: usize,
         points: Vec<MeshGradientPoint>,
     ) -> Result<Self, MeshGradientError> {
-        Self::new_in_color_space(width, height, points, MeshGradientColorSpace::default())
+        Self::new_in_color_space(width, height, points, InterpolationColorSpace::LinearRgba)
     }
 
     /// Creates a checked mesh gradient in the selected interpolation color
@@ -410,7 +327,7 @@ impl MeshGradient {
         width: usize,
         height: usize,
         points: Vec<MeshGradientPoint>,
-        color_space: MeshGradientColorSpace,
+        color_space: InterpolationColorSpace,
     ) -> Result<Self, MeshGradientError> {
         Self::new_with_geometry(
             width,
@@ -438,7 +355,7 @@ impl MeshGradient {
         width: usize,
         height: usize,
         points: Vec<MeshGradientPoint>,
-        color_space: MeshGradientColorSpace,
+        color_space: InterpolationColorSpace,
         geometry: MeshGradientGeometry,
     ) -> Result<Self, MeshGradientError> {
         Self::validate(width, height, &points, color_space, geometry)?;
@@ -483,7 +400,7 @@ impl MeshGradient {
     }
 
     /// Returns the mesh's interpolation color space.
-    pub const fn color_space(&self) -> MeshGradientColorSpace {
+    pub const fn color_space(&self) -> InterpolationColorSpace {
         self.color_space
     }
 
@@ -648,7 +565,7 @@ impl MeshGradient {
     /// unchanged.
     pub fn try_set_color_space(
         &mut self,
-        color_space: MeshGradientColorSpace,
+        color_space: InterpolationColorSpace,
     ) -> Result<(), MeshGradientError> {
         Self::validate(
             self.width,
@@ -686,7 +603,7 @@ impl MeshGradient {
         width: usize,
         height: usize,
         points: &[MeshGradientPoint],
-        color_space: MeshGradientColorSpace,
+        color_space: InterpolationColorSpace,
         geometry: MeshGradientGeometry,
     ) -> Result<(), MeshGradientError> {
         let expected = width
@@ -734,7 +651,7 @@ impl MeshGradient {
             }
             if matches!(
                 color_space,
-                MeshGradientColorSpace::Okhsla | MeshGradientColorSpace::OkhslaLong
+                InterpolationColorSpace::Okhsla | InterpolationColorSpace::OkhslaLong
             ) {
                 let lab = Oklaba::from(point.color);
                 let fallback_range =
@@ -758,24 +675,24 @@ impl MeshGradient {
 
         let mut gpu_component_limits = [MAX_GPU_COMPONENT_MAGNITUDE; 6];
         match color_space {
-            MeshGradientColorSpace::Oklaba => {
+            InterpolationColorSpace::Oklaba => {
                 gpu_component_limits[2..5].fill(MAX_GPU_OKLAB_COMPONENT);
             }
-            MeshGradientColorSpace::Oklcha | MeshGradientColorSpace::OklchaLong => {
+            InterpolationColorSpace::Oklcha | InterpolationColorSpace::OklchaLong => {
                 gpu_component_limits[2..4].fill(MAX_GPU_OKLAB_COMPONENT);
             }
-            MeshGradientColorSpace::Srgba => {
+            InterpolationColorSpace::Srgba => {
                 gpu_component_limits[2..5].fill(MAX_GPU_SRGB_COMPONENT);
             }
-            MeshGradientColorSpace::Hsla
-            | MeshGradientColorSpace::HslaLong
-            | MeshGradientColorSpace::Hsva
-            | MeshGradientColorSpace::HsvaLong => {
+            InterpolationColorSpace::Hsla
+            | InterpolationColorSpace::HslaLong
+            | InterpolationColorSpace::Hsva
+            | InterpolationColorSpace::HsvaLong => {
                 gpu_component_limits[3..5].fill(MAX_GPU_HSL_HSV_COMPONENT);
             }
-            MeshGradientColorSpace::Okhsla
-            | MeshGradientColorSpace::OkhslaLong
-            | MeshGradientColorSpace::LinearRgba => {}
+            InterpolationColorSpace::Okhsla
+            | InterpolationColorSpace::OkhslaLong
+            | InterpolationColorSpace::LinearRgba => {}
         }
         for row in 0..height - 1 {
             for column in 0..width - 1 {
@@ -823,13 +740,13 @@ fn read_color_components(color: Color) -> [f32; 4] {
 
 fn convert_color_to_interpolation_components(
     color: Color,
-    color_space: MeshGradientColorSpace,
+    color_space: InterpolationColorSpace,
 ) -> [f32; 4] {
     match color_space {
-        MeshGradientColorSpace::Oklaba => Oklaba::from(color).to_f32_array(),
-        MeshGradientColorSpace::Srgba => Srgba::from(color).to_f32_array(),
-        MeshGradientColorSpace::LinearRgba => LinearRgba::from(color).to_f32_array(),
-        MeshGradientColorSpace::Oklcha | MeshGradientColorSpace::OklchaLong => {
+        InterpolationColorSpace::Oklaba => Oklaba::from(color).to_f32_array(),
+        InterpolationColorSpace::Srgba => Srgba::from(color).to_f32_array(),
+        InterpolationColorSpace::LinearRgba => LinearRgba::from(color).to_f32_array(),
+        InterpolationColorSpace::Oklcha | InterpolationColorSpace::OklchaLong => {
             let color = Oklcha::from(color);
             [
                 color.lightness,
@@ -838,7 +755,7 @@ fn convert_color_to_interpolation_components(
                 color.alpha,
             ]
         }
-        MeshGradientColorSpace::Hsla | MeshGradientColorSpace::HslaLong => {
+        InterpolationColorSpace::Hsla | InterpolationColorSpace::HslaLong => {
             let color = Hsla::from(color);
             [
                 color.hue / 360.0,
@@ -847,7 +764,7 @@ fn convert_color_to_interpolation_components(
                 color.alpha,
             ]
         }
-        MeshGradientColorSpace::Hsva | MeshGradientColorSpace::HsvaLong => {
+        InterpolationColorSpace::Hsva | InterpolationColorSpace::HsvaLong => {
             let color = Hsva::from(color);
             [
                 color.hue / 360.0,
@@ -856,7 +773,7 @@ fn convert_color_to_interpolation_components(
                 color.alpha,
             ]
         }
-        MeshGradientColorSpace::Okhsla | MeshGradientColorSpace::OkhslaLong => {
+        InterpolationColorSpace::Okhsla | InterpolationColorSpace::OkhslaLong => {
             let color = Okhsla::from(color);
             [
                 color.hue / 360.0,
@@ -1071,7 +988,7 @@ struct SerializedMeshGradient {
     width: usize,
     height: usize,
     points: Vec<MeshGradientPoint>,
-    color_space: MeshGradientColorSpace,
+    color_space: InterpolationColorSpace,
     #[serde(default)]
     color_interpolation: MeshGradientColorInterpolation,
     #[serde(default)]
@@ -1120,7 +1037,7 @@ mod tests {
             width,
             height,
             create_regular_grid(width, height),
-            MeshGradientColorSpace::LinearRgba,
+            InterpolationColorSpace::LinearRgba,
         )
         .unwrap()
     }
@@ -1146,7 +1063,11 @@ mod tests {
     fn defaults_to_the_mobile_friendly_color_path() {
         let mesh = MeshGradient::new(2, 2, create_regular_grid(2, 2)).unwrap();
 
-        assert_eq!(mesh.color_space(), MeshGradientColorSpace::LinearRgba);
+        assert_eq!(
+            InterpolationColorSpace::default(),
+            InterpolationColorSpace::Oklaba
+        );
+        assert_eq!(mesh.color_space(), InterpolationColorSpace::LinearRgba);
         assert_eq!(
             mesh.color_interpolation(),
             MeshGradientColorInterpolation::Vertex
@@ -1199,21 +1120,21 @@ mod tests {
         let mut points = create_regular_grid(2, 2);
         points[0].color = Color::linear_rgba(f32::NAN, 0.0, 0.0, 1.0);
         assert!(matches!(
-            MeshGradient::new_in_color_space(2, 2, points, MeshGradientColorSpace::LinearRgba),
+            MeshGradient::new_in_color_space(2, 2, points, InterpolationColorSpace::LinearRgba),
             Err(MeshGradientError::NonFiniteColor { point: 0 })
         ));
 
         let mut points = create_regular_grid(2, 2);
         points[0].color = Color::linear_rgba(0.0, 0.0, 0.0, 1.1);
         assert!(matches!(
-            MeshGradient::new_in_color_space(2, 2, points, MeshGradientColorSpace::LinearRgba),
+            MeshGradient::new_in_color_space(2, 2, points, InterpolationColorSpace::LinearRgba),
             Err(MeshGradientError::AlphaOutOfRange { point: 0 })
         ));
 
         let mut points = create_regular_grid(2, 2);
         points[0].color = Color::from(Oklaba::new(1.0e20, 0.0, 0.0, 1.0));
         assert!(matches!(
-            MeshGradient::new_in_color_space(2, 2, points, MeshGradientColorSpace::Oklaba),
+            MeshGradient::new_in_color_space(2, 2, points, InterpolationColorSpace::Oklaba),
             Err(MeshGradientError::NonFiniteColor { point: 0 })
         ));
     }
@@ -1229,7 +1150,7 @@ mod tests {
             })
             .collect();
         let mesh =
-            MeshGradient::new_in_color_space(2, 2, points, MeshGradientColorSpace::LinearRgba)
+            MeshGradient::new_in_color_space(2, 2, points, InterpolationColorSpace::LinearRgba)
                 .unwrap();
         assert_eq!(mesh.point_at(0, 0).unwrap().position, Vec2::splat(-1.0));
 
@@ -1240,7 +1161,7 @@ mod tests {
                 2,
                 2,
                 unrepresentable,
-                MeshGradientColorSpace::LinearRgba
+                InterpolationColorSpace::LinearRgba
             ),
             Err(MeshGradientError::NonFiniteDerived { .. })
         ));
@@ -1261,7 +1182,7 @@ mod tests {
                     2,
                     2,
                     points,
-                    MeshGradientColorSpace::LinearRgba,
+                    InterpolationColorSpace::LinearRgba,
                     geometry
                 ),
                 Err(MeshGradientError::NonFiniteDerived { column: 0, row: 0 })
@@ -1276,7 +1197,7 @@ mod tests {
                     2,
                     2,
                     points,
-                    MeshGradientColorSpace::LinearRgba,
+                    InterpolationColorSpace::LinearRgba,
                     geometry
                 ),
                 Err(MeshGradientError::NonFiniteDerived { column: 0, row: 0 })
@@ -1320,32 +1241,32 @@ mod tests {
             point.color = Color::from(Oklaba::new(l, 0.0, 0.0, 1.0));
         }
         assert!(matches!(
-            MeshGradient::new_in_color_space(4, 2, points, MeshGradientColorSpace::Oklaba),
+            MeshGradient::new_in_color_space(4, 2, points, InterpolationColorSpace::Oklaba),
             Err(MeshGradientError::NonFiniteDerived { .. })
         ));
 
         // Supplied points fit their limit; only the plateau's Bezier handles
         // exceed it. This verifies that checking inputs alone is insufficient.
         for space in [
-            MeshGradientColorSpace::Oklaba,
-            MeshGradientColorSpace::Oklcha,
-            MeshGradientColorSpace::OklchaLong,
-            MeshGradientColorSpace::Srgba,
-            MeshGradientColorSpace::Hsla,
-            MeshGradientColorSpace::HslaLong,
-            MeshGradientColorSpace::Hsva,
-            MeshGradientColorSpace::HsvaLong,
+            InterpolationColorSpace::Oklaba,
+            InterpolationColorSpace::Oklcha,
+            InterpolationColorSpace::OklchaLong,
+            InterpolationColorSpace::Srgba,
+            InterpolationColorSpace::Hsla,
+            InterpolationColorSpace::HslaLong,
+            InterpolationColorSpace::Hsva,
+            InterpolationColorSpace::HsvaLong,
         ] {
             let create_color = |high| {
                 let fraction = if high { 0.95 } else { 0.0 };
                 match space {
-                    MeshGradientColorSpace::Oklaba => Color::from(Oklaba::new(
+                    InterpolationColorSpace::Oklaba => Color::from(Oklaba::new(
                         fraction * MAX_GPU_OKLAB_COMPONENT as f32,
                         0.0,
                         0.0,
                         1.0,
                     )),
-                    MeshGradientColorSpace::Oklcha | MeshGradientColorSpace::OklchaLong => {
+                    InterpolationColorSpace::Oklcha | InterpolationColorSpace::OklchaLong => {
                         Color::from(Oklcha::new(
                             0.5,
                             fraction * MAX_GPU_OKLAB_COMPONENT as f32,
@@ -1353,18 +1274,28 @@ mod tests {
                             1.0,
                         ))
                     }
-                    MeshGradientColorSpace::Srgba => Color::from(Srgba::new(
+                    InterpolationColorSpace::Srgba => Color::from(Srgba::new(
                         fraction * MAX_GPU_SRGB_COMPONENT as f32,
                         0.0,
                         0.0,
                         1.0,
                     )),
-                    MeshGradientColorSpace::Hsla | MeshGradientColorSpace::HslaLong => Color::from(
-                        Hsla::new(0.0, fraction * MAX_GPU_HSL_HSV_COMPONENT as f32, 0.25, 1.0),
-                    ),
-                    MeshGradientColorSpace::Hsva | MeshGradientColorSpace::HsvaLong => Color::from(
-                        Hsva::new(0.0, fraction * MAX_GPU_HSL_HSV_COMPONENT as f32, 0.5, 1.0),
-                    ),
+                    InterpolationColorSpace::Hsla | InterpolationColorSpace::HslaLong => {
+                        Color::from(Hsla::new(
+                            0.0,
+                            fraction * MAX_GPU_HSL_HSV_COMPONENT as f32,
+                            0.25,
+                            1.0,
+                        ))
+                    }
+                    InterpolationColorSpace::Hsva | InterpolationColorSpace::HsvaLong => {
+                        Color::from(Hsva::new(
+                            0.0,
+                            fraction * MAX_GPU_HSL_HSV_COMPONENT as f32,
+                            0.5,
+                            1.0,
+                        ))
+                    }
                     _ => unreachable!(),
                 }
             };
@@ -1385,8 +1316,8 @@ mod tests {
             );
         }
         for space in [
-            MeshGradientColorSpace::Okhsla,
-            MeshGradientColorSpace::OkhslaLong,
+            InterpolationColorSpace::Okhsla,
+            InterpolationColorSpace::OkhslaLong,
         ] {
             let mut points = create_regular_grid(2, 2);
             for point in &mut points {
@@ -1414,17 +1345,17 @@ mod tests {
     #[test]
     fn conversion_budgets_preserve_safe_hdr_in_both_color_modes() {
         for space in [
-            MeshGradientColorSpace::Oklaba,
-            MeshGradientColorSpace::Oklcha,
-            MeshGradientColorSpace::OklchaLong,
-            MeshGradientColorSpace::Hsla,
-            MeshGradientColorSpace::HslaLong,
-            MeshGradientColorSpace::Hsva,
-            MeshGradientColorSpace::HsvaLong,
-            MeshGradientColorSpace::Okhsla,
-            MeshGradientColorSpace::OkhslaLong,
-            MeshGradientColorSpace::Srgba,
-            MeshGradientColorSpace::LinearRgba,
+            InterpolationColorSpace::Oklaba,
+            InterpolationColorSpace::Oklcha,
+            InterpolationColorSpace::OklchaLong,
+            InterpolationColorSpace::Hsla,
+            InterpolationColorSpace::HslaLong,
+            InterpolationColorSpace::Hsva,
+            InterpolationColorSpace::HsvaLong,
+            InterpolationColorSpace::Okhsla,
+            InterpolationColorSpace::OkhslaLong,
+            InterpolationColorSpace::Srgba,
+            InterpolationColorSpace::LinearRgba,
         ] {
             let mut points = create_regular_grid(2, 2);
             for point in &mut points {
@@ -1442,27 +1373,27 @@ mod tests {
         }
         let cases = [
             (
-                MeshGradientColorSpace::Oklaba,
+                InterpolationColorSpace::Oklaba,
                 Color::from(Oklaba::new(1.0e10, -1.0e10, 1.0e10, 1.0)),
             ),
             (
-                MeshGradientColorSpace::Oklcha,
+                InterpolationColorSpace::Oklcha,
                 Color::from(Oklcha::new(1.0e10, 1.0e10, 30.0, 1.0)),
             ),
             (
-                MeshGradientColorSpace::Srgba,
+                InterpolationColorSpace::Srgba,
                 Color::from(Srgba::new(1.0e13, -1.0e13, 1.0e13, 1.0)),
             ),
             (
-                MeshGradientColorSpace::Hsla,
+                InterpolationColorSpace::Hsla,
                 Color::from(Hsla::new(30.0, 1.0e5, 1.0e5, 1.0)),
             ),
             (
-                MeshGradientColorSpace::Hsva,
+                InterpolationColorSpace::Hsva,
                 Color::from(Hsva::new(30.0, 1.0e5, 1.0e5, 1.0)),
             ),
             (
-                MeshGradientColorSpace::Okhsla,
+                InterpolationColorSpace::Okhsla,
                 Color::from(Oklaba::new(1.0e8, 0.0, 0.0, 1.0)),
             ),
         ];
@@ -1600,7 +1531,7 @@ mod tests {
                 width,
                 height,
                 points,
-                MeshGradientColorSpace::LinearRgba,
+                InterpolationColorSpace::LinearRgba,
                 MeshGradientGeometry::AllowFolds,
             )
             .unwrap();
@@ -1705,7 +1636,7 @@ mod tests {
             5,
             4,
             points,
-            MeshGradientColorSpace::Oklaba,
+            InterpolationColorSpace::Oklaba,
             MeshGradientGeometry::AllowFolds,
         )
         .unwrap();
@@ -1722,7 +1653,7 @@ mod tests {
             3,
             3,
             points,
-            MeshGradientColorSpace::Oklaba,
+            InterpolationColorSpace::Oklaba,
             MeshGradientGeometry::AllowFolds,
         )
         .unwrap();
@@ -1766,7 +1697,7 @@ mod tests {
             .map(|point| {
                 let color = convert_color_to_interpolation_components(
                     point.color,
-                    MeshGradientColorSpace::LinearRgba,
+                    InterpolationColorSpace::LinearRgba,
                 );
                 [
                     point.position.x as f64,
@@ -1787,7 +1718,7 @@ mod tests {
                 width,
                 height,
                 points,
-                MeshGradientColorSpace::LinearRgba
+                InterpolationColorSpace::LinearRgba
             ),
             Err(MeshGradientError::UncertifiedGeometry { .. })
         ));
@@ -1868,7 +1799,7 @@ mod tests {
         for point in points {
             let color = convert_color_to_interpolation_components(
                 point.color,
-                MeshGradientColorSpace::LinearRgba,
+                InterpolationColorSpace::LinearRgba,
             );
             values.push([
                 point.position.x as f64,
@@ -1960,32 +1891,41 @@ mod tests {
 
     #[test]
     fn every_ui_color_space_is_supported_and_validated() {
-        for space in [
-            InterpolationColorSpace::Oklaba,
-            InterpolationColorSpace::Oklcha,
-            InterpolationColorSpace::OklchaLong,
-            InterpolationColorSpace::Hsla,
-            InterpolationColorSpace::HslaLong,
-            InterpolationColorSpace::Hsva,
-            InterpolationColorSpace::HsvaLong,
-            InterpolationColorSpace::Okhsla,
-            InterpolationColorSpace::OkhslaLong,
-            InterpolationColorSpace::Srgba,
-            InterpolationColorSpace::LinearRgba,
+        for (space, variant_name, is_hue_based) in [
+            (InterpolationColorSpace::Oklaba, "Oklaba", false),
+            (InterpolationColorSpace::Oklcha, "Oklcha", true),
+            (InterpolationColorSpace::OklchaLong, "OklchaLong", true),
+            (InterpolationColorSpace::Hsla, "Hsla", true),
+            (InterpolationColorSpace::HslaLong, "HslaLong", true),
+            (InterpolationColorSpace::Hsva, "Hsva", true),
+            (InterpolationColorSpace::HsvaLong, "HsvaLong", true),
+            (InterpolationColorSpace::Okhsla, "Okhsla", true),
+            (InterpolationColorSpace::OkhslaLong, "OkhslaLong", true),
+            (InterpolationColorSpace::Srgba, "Srgba", false),
+            (InterpolationColorSpace::LinearRgba, "LinearRgba", false),
         ] {
-            let mesh_space = MeshGradientColorSpace::from(space);
-            assert_eq!(InterpolationColorSpace::from(mesh_space), space);
+            assert_eq!(space.is_hue_based(), is_hue_based);
+            assert_eq!(format!("{space:?}"), variant_name);
             let mut mesh = create_regular_mesh(2, 2);
-            mesh.try_set_color_space(mesh_space).unwrap();
-            assert_eq!(mesh.color_space(), mesh_space);
-            #[cfg(feature = "serialize")]
-            {
-                let encoded = ron::to_string(&mesh).unwrap();
-                assert_eq!(ron::from_str::<MeshGradient>(&encoded).unwrap(), mesh);
+            mesh.try_set_color_space(space).unwrap();
+            assert_eq!(mesh.color_space(), space);
+            assert_eq!(crate::Gradient::Mesh(mesh.clone()).get_color_space(), space);
+            for mode in [
+                MeshGradientColorInterpolation::Vertex,
+                MeshGradientColorInterpolation::Bicubic,
+            ] {
+                mesh.set_color_interpolation(mode);
+                #[cfg(feature = "serialize")]
+                {
+                    assert_eq!(ron::to_string(&space).unwrap(), variant_name);
+                    let encoded = ron::to_string(&mesh).unwrap();
+                    assert!(encoded.contains(&format!("color_space:{variant_name},")));
+                    assert_eq!(ron::from_str::<MeshGradient>(&encoded).unwrap(), mesh);
+                }
             }
             assert!(convert_color_to_interpolation_components(
                 Color::hsva(350.0, 0.7, 0.8, 0.5),
-                mesh_space
+                space
             )
             .iter()
             .all(|component| component.is_finite()));
@@ -2007,7 +1947,7 @@ mod tests {
             3,
             3,
             points,
-            MeshGradientColorSpace::LinearRgba,
+            InterpolationColorSpace::LinearRgba,
             MeshGradientGeometry::AllowFolds,
         )
         .unwrap();
@@ -2020,7 +1960,7 @@ mod tests {
             width: 1,
             height: 2,
             points: create_regular_grid(2, 2),
-            color_space: MeshGradientColorSpace::LinearRgba,
+            color_space: InterpolationColorSpace::LinearRgba,
             color_interpolation: MeshGradientColorInterpolation::Vertex,
             geometry: MeshGradientGeometry::NonFolding,
         };

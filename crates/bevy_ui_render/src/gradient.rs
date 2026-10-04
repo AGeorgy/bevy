@@ -45,8 +45,8 @@ use bevy_text::{EmSize, RemSize};
 use bevy_ui::{
     BackgroundGradient, BorderGradient, ColorStop, ComputedStackIndex, ComputedUiRenderTargetInfo,
     ConicGradient, Gradient, InterpolationColorSpace, LinearGradient, MeshGradient,
-    MeshGradientColorInterpolation, MeshGradientColorSpace, MeshGradientGeometry, RadialGradient,
-    ResolvedBorderRadius, Val, MAX_MESH_GRADIENT_DIMENSION,
+    MeshGradientColorInterpolation, MeshGradientGeometry, RadialGradient, ResolvedBorderRadius,
+    Val, MAX_MESH_GRADIENT_DIMENSION,
 };
 use bevy_utils::default;
 use bytemuck::{cast_slice, Pod, Zeroable};
@@ -249,7 +249,7 @@ fn build_gradient_shader_defs(key: UiGradientPipelineKey) -> Vec<ShaderDefVal> {
         return shader_defs;
     }
 
-    let hue_based = MeshGradientColorSpace::from(key.color_space).is_hue_based();
+    let hue_based = key.color_space.is_hue_based();
     if hue_based {
         shader_defs.push("HUE_COLOR".into());
     }
@@ -1419,14 +1419,11 @@ fn build_mesh_gradient_points_uniform(mesh: &MeshGradient) -> MeshGradientPoints
     let mut colors = [Vec4::ZERO; MAX_MESH_GRADIENT_POINTS];
     let uses_okhsl = matches!(
         mesh.color_space(),
-        MeshGradientColorSpace::Okhsla | MeshGradientColorSpace::OkhslaLong
+        InterpolationColorSpace::Okhsla | InterpolationColorSpace::OkhslaLong
     );
     for (index, point) in mesh.points().iter().enumerate() {
         positions[index] = point.position.extend(0.0).extend(0.0);
-        colors[index] = Vec4::from_array(convert_color_to_space(
-            point.color,
-            mesh.color_space().into(),
-        ));
+        colors[index] = Vec4::from_array(convert_color_to_space(point.color, mesh.color_space()));
         if uses_okhsl {
             let lab = Oklaba::from(point.color);
             positions[index].z = lab.lightness;
@@ -1447,10 +1444,10 @@ fn build_mesh_gradient_points_uniform(mesh: &MeshGradient) -> MeshGradientPoints
 /// can contain hue cycles, so independently choosing paths on all four edges of
 /// a cell is not always possible. Use a fixed spanning tree: the first column,
 /// followed by each row. Every patch then reads the same lifted control hues.
-fn unwrap_mesh_hues(colors: &mut [Vec4], width: usize, space: MeshGradientColorSpace) {
+fn unwrap_mesh_hues(colors: &mut [Vec4], width: usize, space: InterpolationColorSpace) {
     let hue_channel = if matches!(
         space,
-        MeshGradientColorSpace::Oklcha | MeshGradientColorSpace::OklchaLong
+        InterpolationColorSpace::Oklcha | InterpolationColorSpace::OklchaLong
     ) {
         2
     } else {
@@ -1488,14 +1485,14 @@ fn unwrap_mesh_hues(colors: &mut [Vec4], width: usize, space: MeshGradientColorS
         let start = colors[previous][hue_channel];
         let difference = colors[index][hue_channel] - start.rem_euclid(1.0);
         let delta = match space {
-            MeshGradientColorSpace::Hsla | MeshGradientColorSpace::Okhsla => {
+            InterpolationColorSpace::Hsla | InterpolationColorSpace::Okhsla => {
                 (difference + 0.5).rem_euclid(1.0) - 0.5
             }
-            MeshGradientColorSpace::HslaLong | MeshGradientColorSpace::OkhslaLong => {
+            InterpolationColorSpace::HslaLong | InterpolationColorSpace::OkhslaLong => {
                 let short = (difference + 0.5).rem_euclid(1.0) - 0.5;
                 short + if short > 0.0 { -1.0 } else { 1.0 }
             }
-            MeshGradientColorSpace::HsvaLong | MeshGradientColorSpace::OklchaLong => {
+            InterpolationColorSpace::HsvaLong | InterpolationColorSpace::OklchaLong => {
                 if difference.abs() < 0.5 {
                     difference + if difference >= 0.0 { -1.0 } else { 1.0 }
                 } else {
@@ -1851,7 +1848,7 @@ mod tests {
     use bevy_color::Color;
     use bevy_math::Vec4Swizzles;
     use bevy_shader::{ShaderCache, ShaderCacheSource};
-    use bevy_ui::{CalculatedClipRect, MeshGradientColorSpace, MeshGradientPoint};
+    use bevy_ui::{CalculatedClipRect, MeshGradientPoint};
     use smallvec::SmallVec;
 
     fn create_full_capacity_mesh() -> MeshGradient {
@@ -1865,7 +1862,7 @@ mod tests {
                 ));
             }
         }
-        MeshGradient::new_in_color_space(16, 16, points, MeshGradientColorSpace::LinearRgba)
+        MeshGradient::new_in_color_space(16, 16, points, InterpolationColorSpace::LinearRgba)
             .unwrap()
     }
 
@@ -1994,7 +1991,7 @@ mod tests {
                             assert_eq!(
                                 compiled.contains("interpolation_color: vec4<f32>"),
                                 mesh_color_interpolation == MeshGradientColorInterpolation::Vertex
-                                    && !MeshGradientColorSpace::from(color_space).is_hue_based()
+                                    && !color_space.is_hue_based()
                             );
                             permutation += 1;
                         }
@@ -2058,14 +2055,14 @@ mod tests {
         assert!(have_matching_surface_bounds_inputs(&left, &right));
 
         left.set_color_interpolation(MeshGradientColorInterpolation::Vertex);
-        left.try_set_color_space(MeshGradientColorSpace::Hsva)
+        left.try_set_color_space(InterpolationColorSpace::Hsva)
             .unwrap();
         assert!(have_matching_surface_bounds_inputs(&left, &right));
 
         right.set_color_interpolation(MeshGradientColorInterpolation::Vertex);
         assert!(!have_matching_surface_bounds_inputs(&left, &right));
         right
-            .try_set_color_space(MeshGradientColorSpace::HsvaLong)
+            .try_set_color_space(InterpolationColorSpace::HsvaLong)
             .unwrap();
         assert!(have_matching_surface_bounds_inputs(&left, &right));
     }
@@ -2258,7 +2255,7 @@ mod tests {
                 };
                 assert_eq!(declarations(&compiled_short), declarations(&compiled_long));
 
-                let make_mesh = |space: MeshGradientColorSpace| {
+                let make_mesh = |space: InterpolationColorSpace| {
                     MeshGradient::new_in_color_space(
                         2,
                         2,
@@ -2275,8 +2272,8 @@ mod tests {
                     .unwrap()
                     .with_color_interpolation(interpolation)
                 };
-                let short_points = build_mesh_gradient_points_uniform(&make_mesh(short.into()));
-                let long_points = build_mesh_gradient_points_uniform(&make_mesh(long.into()));
+                let short_points = build_mesh_gradient_points_uniform(&make_mesh(short));
+                let long_points = build_mesh_gradient_points_uniform(&make_mesh(long));
                 assert_ne!(short_points.colors[..4], long_points.colors[..4]);
             }
         }
@@ -2307,8 +2304,8 @@ mod tests {
     #[test]
     fn mesh_hues_keep_one_winding_across_the_control_grid() {
         for (space, expected_top_delta) in [
-            (MeshGradientColorSpace::Hsva, 20.0 / 360.0),
-            (MeshGradientColorSpace::HsvaLong, -340.0 / 360.0),
+            (InterpolationColorSpace::Hsva, 20.0 / 360.0),
+            (InterpolationColorSpace::HsvaLong, -340.0 / 360.0),
         ] {
             let mesh = MeshGradient::new_in_color_space(
                 2,
@@ -2334,14 +2331,14 @@ mod tests {
     #[test]
     fn continuous_hue_field_avoids_large_center_seams() {
         for space in [
-            MeshGradientColorSpace::Oklcha,
-            MeshGradientColorSpace::OklchaLong,
-            MeshGradientColorSpace::Hsla,
-            MeshGradientColorSpace::HslaLong,
-            MeshGradientColorSpace::Hsva,
-            MeshGradientColorSpace::HsvaLong,
-            MeshGradientColorSpace::Okhsla,
-            MeshGradientColorSpace::OkhslaLong,
+            InterpolationColorSpace::Oklcha,
+            InterpolationColorSpace::OklchaLong,
+            InterpolationColorSpace::Hsla,
+            InterpolationColorSpace::HslaLong,
+            InterpolationColorSpace::Hsva,
+            InterpolationColorSpace::HsvaLong,
+            InterpolationColorSpace::Okhsla,
+            InterpolationColorSpace::OkhslaLong,
         ] {
             let mesh = MeshGradient::new_in_color_space(
                 2,
@@ -2365,7 +2362,7 @@ mod tests {
                     .lerp(points.colors[1], u)
                     .lerp(points.colors[2].lerp(points.colors[3], u), v);
                 let color = match space {
-                    MeshGradientColorSpace::Oklcha | MeshGradientColorSpace::OklchaLong => {
+                    InterpolationColorSpace::Oklcha | InterpolationColorSpace::OklchaLong => {
                         Color::from(Oklcha::new(
                             value.x,
                             value.y,
@@ -2373,12 +2370,22 @@ mod tests {
                             value.w,
                         ))
                     }
-                    MeshGradientColorSpace::Hsla | MeshGradientColorSpace::HslaLong => Color::from(
-                        Hsla::new(value.x.rem_euclid(1.0) * 360.0, value.y, value.z, value.w),
-                    ),
-                    MeshGradientColorSpace::Hsva | MeshGradientColorSpace::HsvaLong => Color::from(
-                        Hsva::new(value.x.rem_euclid(1.0) * 360.0, value.y, value.z, value.w),
-                    ),
+                    InterpolationColorSpace::Hsla | InterpolationColorSpace::HslaLong => {
+                        Color::from(Hsla::new(
+                            value.x.rem_euclid(1.0) * 360.0,
+                            value.y,
+                            value.z,
+                            value.w,
+                        ))
+                    }
+                    InterpolationColorSpace::Hsva | InterpolationColorSpace::HsvaLong => {
+                        Color::from(Hsva::new(
+                            value.x.rem_euclid(1.0) * 360.0,
+                            value.y,
+                            value.z,
+                            value.w,
+                        ))
+                    }
                     _ => Color::from(Okhsla::new(
                         value.x.rem_euclid(1.0) * 360.0,
                         value.y,
@@ -2389,7 +2396,7 @@ mod tests {
                 let mut rgb = color.to_linear().to_f32_array();
                 if matches!(
                     space,
-                    MeshGradientColorSpace::Okhsla | MeshGradientColorSpace::OkhslaLong
+                    InterpolationColorSpace::Okhsla | InterpolationColorSpace::OkhslaLong
                 ) {
                     let distance = ((value.x - 264.052 / 360.0 + 0.5).rem_euclid(1.0) - 0.5).abs();
                     if distance < 0.01 {
@@ -2420,7 +2427,7 @@ mod tests {
             };
             if matches!(
                 space,
-                MeshGradientColorSpace::Okhsla | MeshGradientColorSpace::OkhslaLong
+                InterpolationColorSpace::Okhsla | InterpolationColorSpace::OkhslaLong
             ) {
                 for (index, (u, v)) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
                     .into_iter()
@@ -2448,7 +2455,7 @@ mod tests {
                     };
                     let hue_channel = if matches!(
                         space,
-                        MeshGradientColorSpace::Oklcha | MeshGradientColorSpace::OklchaLong
+                        InterpolationColorSpace::Oklcha | InterpolationColorSpace::OklchaLong
                     ) {
                         2
                     } else {

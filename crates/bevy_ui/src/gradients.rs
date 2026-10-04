@@ -519,7 +519,7 @@ impl Gradient {
             Gradient::Linear(linear_gradient) => linear_gradient.color_space,
             Gradient::Radial(radial_gradient) => radial_gradient.color_space,
             Gradient::Conic(conic_gradient) => conic_gradient.color_space,
-            Gradient::Mesh(mesh_gradient) => mesh_gradient.color_space().into(),
+            Gradient::Mesh(mesh_gradient) => mesh_gradient.color_space(),
         }
     }
 }
@@ -706,6 +706,13 @@ pub enum InterpolationColorSpace {
     Okhsla,
     /// Interpolates in OKHSLA space, taking the longest hue path.
     OkhslaLong,
+}
+
+impl InterpolationColorSpace {
+    /// Returns whether this space interpolates a circular hue coordinate.
+    pub const fn is_hue_based(self) -> bool {
+        !matches!(self, Self::Oklaba | Self::Srgba | Self::LinearRgba)
+    }
 }
 
 /// Set the color space used for interpolation.

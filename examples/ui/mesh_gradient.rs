@@ -17,7 +17,7 @@ use bevy::{
     picking::hover::Hovered,
     prelude::*,
     ui::{
-        MeshGradient, MeshGradientColorInterpolation, MeshGradientColorSpace, MeshGradientError,
+        InterpolationColorSpace, MeshGradient, MeshGradientColorInterpolation, MeshGradientError,
         MeshGradientGeometry, MeshGradientPoint, Pressed,
     },
     ui_widgets::{Activate, Button, Slider, SliderRange, SliderThumb, SliderValue, ValueChange},
@@ -53,7 +53,7 @@ impl EditorState {
             DEFAULT_WIDTH,
             DEFAULT_HEIGHT,
             points.clone(),
-            MeshGradientColorSpace::LinearRgba,
+            InterpolationColorSpace::LinearRgba,
             MeshGradientGeometry::AllowFolds,
         )
         .expect("preset must be valid");
@@ -173,7 +173,7 @@ enum EditorAction {
     ToggleBorder,
     ToggleDebugUi,
     SetColorInterpolation(MeshGradientColorInterpolation),
-    SetColorSpace(MeshGradientColorSpace),
+    SetColorSpace(InterpolationColorSpace),
 }
 
 fn main() {
@@ -612,24 +612,24 @@ fn spawn_inspector(parent: &mut ChildSpawnerCommands, state: &EditorState) {
                 children![
                     create_action_button(
                         "Linear",
-                        EditorAction::SetColorSpace(MeshGradientColorSpace::LinearRgba),
+                        EditorAction::SetColorSpace(InterpolationColorSpace::LinearRgba),
                     ),
                     create_action_button(
                         "sRGB",
-                        EditorAction::SetColorSpace(MeshGradientColorSpace::Srgba),
+                        EditorAction::SetColorSpace(InterpolationColorSpace::Srgba),
                     ),
                     create_action_button(
                         "OKLab",
-                        EditorAction::SetColorSpace(MeshGradientColorSpace::Oklaba),
+                        EditorAction::SetColorSpace(InterpolationColorSpace::Oklaba),
                     ),
-                    create_action_button("OKLCH", EditorAction::SetColorSpace(MeshGradientColorSpace::Oklcha)),
-                    create_action_button("OKLCH Long", EditorAction::SetColorSpace(MeshGradientColorSpace::OklchaLong)),
-                    create_action_button("HSL", EditorAction::SetColorSpace(MeshGradientColorSpace::Hsla)),
-                    create_action_button("HSL Long", EditorAction::SetColorSpace(MeshGradientColorSpace::HslaLong)),
-                    create_action_button("HSV", EditorAction::SetColorSpace(MeshGradientColorSpace::Hsva)),
-                    create_action_button("HSV Long", EditorAction::SetColorSpace(MeshGradientColorSpace::HsvaLong)),
-                    create_action_button("OKHSL", EditorAction::SetColorSpace(MeshGradientColorSpace::Okhsla)),
-                    create_action_button("OKHSL Long", EditorAction::SetColorSpace(MeshGradientColorSpace::OkhslaLong)),
+                    create_action_button("OKLCH", EditorAction::SetColorSpace(InterpolationColorSpace::Oklcha)),
+                    create_action_button("OKLCH Long", EditorAction::SetColorSpace(InterpolationColorSpace::OklchaLong)),
+                    create_action_button("HSL", EditorAction::SetColorSpace(InterpolationColorSpace::Hsla)),
+                    create_action_button("HSL Long", EditorAction::SetColorSpace(InterpolationColorSpace::HslaLong)),
+                    create_action_button("HSV", EditorAction::SetColorSpace(InterpolationColorSpace::Hsva)),
+                    create_action_button("HSV Long", EditorAction::SetColorSpace(InterpolationColorSpace::HsvaLong)),
+                    create_action_button("OKHSL", EditorAction::SetColorSpace(InterpolationColorSpace::Okhsla)),
+                    create_action_button("OKHSL Long", EditorAction::SetColorSpace(InterpolationColorSpace::OkhslaLong)),
                 ]
             ),
             (

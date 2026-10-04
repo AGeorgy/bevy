@@ -3,7 +3,7 @@
 use bevy::{
     color::palettes::css::{BLUE, GREEN, INDIGO, LIME, ORANGE, RED, VIOLET, YELLOW},
     prelude::*,
-    ui::{ColorStop, MeshGradient, MeshGradientColorSpace, MeshGradientPoint},
+    ui::{ColorStop, MeshGradient, MeshGradientPoint},
     ui_widgets::{Activate, Button},
 };
 use std::f32::consts::TAU;
@@ -259,7 +259,7 @@ fn create_compact_mesh_gradient() -> MeshGradient {
         ]
         .map(|(position, color)| MeshGradientPoint::new(position, color.into()))
         .to_vec(),
-        MeshGradientColorSpace::from(COLOR_SPACES[0]),
+        COLOR_SPACES[0],
     )
     .expect("the example mesh must be valid")
 }
@@ -384,7 +384,7 @@ fn on_activate_change_space(
 }
 
 fn update_mesh_color_space(mesh: &mut MeshGradient, selected: InterpolationColorSpace) {
-    mesh.try_set_color_space(selected.into())
+    mesh.try_set_color_space(selected)
         .expect("the example colors must be valid in every UI color space");
 }
 
@@ -412,10 +412,7 @@ mod tests {
             .add_observer(on_activate_change_space);
         let button = app.world_mut().spawn((Button, NextButton)).id();
         let mesh = create_compact_mesh_gradient();
-        assert_eq!(
-            InterpolationColorSpace::from(mesh.color_space()),
-            COLOR_SPACES[0]
-        );
+        assert_eq!(mesh.color_space(), COLOR_SPACES[0]);
         let preview = app
             .world_mut()
             .spawn((
@@ -449,11 +446,11 @@ mod tests {
                     let Gradient::Mesh(mesh) = gradient else {
                         panic!("the preview must remain a mesh gradient");
                     };
-                    assert_eq!(InterpolationColorSpace::from(mesh.color_space()), selected);
+                    assert_eq!(mesh.color_space(), selected);
                 }
                 assert_eq!(
                     app.world().get::<Text>(label).unwrap().0,
-                    format!("Mesh: {:?}", MeshGradientColorSpace::from(selected))
+                    format!("Mesh: {selected:?}")
                 );
             }
         }
