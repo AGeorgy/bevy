@@ -523,15 +523,7 @@ impl MeshGradient {
         &mut self,
         points: Vec<MeshGradientPoint>,
     ) -> Result<(), MeshGradientError> {
-        Self::validate(
-            self.width,
-            self.height,
-            &points,
-            self.color_space,
-            self.geometry,
-        )?;
-        self.points = points;
-        Ok(())
+        self.try_replace_grid(self.width, self.height, points)
     }
 
     /// Replaces the entire grid atomically while retaining the color space.

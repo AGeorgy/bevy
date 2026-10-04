@@ -329,11 +329,10 @@ fn on_activate_change_space(
     mut app_settings: ResMut<AppSettings>,
     button_type_q: Query<(Has<PreviousButton>, Has<NextButton>), With<Button>>,
     mut gradients_query: Query<(&mut BackgroundGradient, Option<&mut BorderGradient>)>,
-    mut label_q: Query<(
-        &mut Text,
-        Has<CurrentColorSpaceLabel>,
-        Has<MeshColorSpaceLabel>,
-    )>,
+    mut label_q: Query<
+        (&mut Text, Has<CurrentColorSpaceLabel>),
+        Or<(With<CurrentColorSpaceLabel>, With<MeshColorSpaceLabel>)>,
+    >,
 ) {
     let Ok((has_previous, has_next)) = button_type_q.get(event.entity) else {
         return;
@@ -353,17 +352,13 @@ fn on_activate_change_space(
 
     // Set the current space label and update the visuals.
     let next_space = COLOR_SPACES[app_settings.color_space_current_index];
-    let mut mesh_space = None;
     for (mut gradients, border) in gradients_query.iter_mut() {
         for gradient in gradients.0.iter_mut() {
             match gradient {
                 Gradient::Linear(linear_gradient) => linear_gradient.color_space = next_space,
                 Gradient::Radial(radial_gradient) => radial_gradient.color_space = next_space,
                 Gradient::Conic(conic_gradient) => conic_gradient.color_space = next_space,
-                Gradient::Mesh(mesh) => {
-                    update_mesh_color_space(mesh, next_space);
-                    mesh_space = Some(mesh.color_space());
-                }
+                Gradient::Mesh(mesh) => update_mesh_color_space(mesh, next_space),
             }
         }
         if let Some(mut border) = border {
@@ -374,11 +369,11 @@ fn on_activate_change_space(
             }
         }
     }
-    for (mut label, current, mesh) in &mut label_q {
+    for (mut label, current) in &mut label_q {
         if current {
             label.0 = format!("Current Space\n{next_space:?}");
-        } else if mesh && let Some(space) = mesh_space {
-            label.0 = format!("Mesh: {space:?}");
+        } else {
+            label.0 = format!("Mesh: {next_space:?}");
         }
     }
 }

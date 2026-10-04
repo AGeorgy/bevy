@@ -158,12 +158,11 @@ impl TopologyKey {
 
     fn fits_within(&self, cap: &Self) -> bool {
         self.has_same_dimensions(cap)
-            && (0..self.height - 1).all(|row| {
-                (0..self.width - 1).all(|column| {
-                    self.u_subdivisions(column, row) <= cap.u_subdivisions(column, row)
-                        && self.v_subdivisions(column, row) <= cap.v_subdivisions(column, row)
-                })
-            })
+            && self
+                .factors
+                .iter()
+                .zip(&cap.factors)
+                .all(|(factor, cap)| (factor & 0xff) <= (cap & 0xff) && (factor >> 8) <= (cap >> 8))
     }
 
     pub fn find_maximum_subdivisions(&self) -> usize {
@@ -175,11 +174,9 @@ impl TopologyKey {
     }
 
     pub fn count_triangles(&self) -> usize {
-        (0..self.height - 1)
-            .flat_map(|row| (0..self.width - 1).map(move |column| (column, row)))
-            .map(|(column, row)| {
-                2 * self.u_subdivisions(column, row) * self.v_subdivisions(column, row)
-            })
+        self.factors
+            .iter()
+            .map(|factor| 2 * usize::from(factor & 0xff) * usize::from(factor >> 8))
             .sum()
     }
 }
@@ -212,21 +209,26 @@ impl ParameterVertex {
             .all(|value| value <= u8::MAX as usize));
         Self {
             packed: [
-                pack_bytes(patch[0], patch[1], numerator[0], numerator[1]),
-                pack_bytes(
-                    subdivisions[0],
-                    subdivisions[1],
-                    position_subdivisions[0],
-                    position_subdivisions[1],
-                ),
+                u32::from_le_bytes([
+                    patch[0] as u8,
+                    patch[1] as u8,
+                    numerator[0] as u8,
+                    numerator[1] as u8,
+                ]),
+                u32::from_le_bytes([
+                    subdivisions[0] as u8,
+                    subdivisions[1] as u8,
+                    position_subdivisions[0] as u8,
+                    position_subdivisions[1] as u8,
+                ]),
             ],
         }
     }
 
     #[cfg(test)]
     fn unpack(self) -> ([u32; 2], [f32; 2], [u32; 2], [u32; 2]) {
-        let first = unpack_bytes(self.packed[0]);
-        let second = unpack_bytes(self.packed[1]);
+        let first = self.packed[0].to_le_bytes().map(u32::from);
+        let second = self.packed[1].to_le_bytes().map(u32::from);
         let subdivisions = [second[0], second[1]];
         (
             [first[0], first[1]],
@@ -238,20 +240,6 @@ impl ParameterVertex {
             [second[2], second[3]],
         )
     }
-}
-
-const fn pack_bytes(a: usize, b: usize, c: usize, d: usize) -> u32 {
-    a as u32 | (b as u32) << 8 | (c as u32) << 16 | (d as u32) << 24
-}
-
-#[cfg(test)]
-const fn unpack_bytes(value: u32) -> [u32; 4] {
-    [
-        value & 0xff,
-        (value >> 8) & 0xff,
-        (value >> 16) & 0xff,
-        value >> 24,
-    ]
 }
 
 pub(crate) struct ParameterTopology {

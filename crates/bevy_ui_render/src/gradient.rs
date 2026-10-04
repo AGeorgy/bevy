@@ -24,7 +24,7 @@ use bevy_math::{
     ops::{cos, hypot, sin},
     FloatOrd, Rect, Vec2,
 };
-use bevy_math::{Affine2, UVec4, Vec2Swizzles, Vec4};
+use bevy_math::{Affine2, Mat3, UVec4, Vec2Swizzles, Vec4};
 use bevy_mesh::VertexBufferLayout;
 use bevy_platform::{
     collections::{HashMap, HashSet},
@@ -1492,18 +1492,9 @@ fn build_mesh_gradient_style_uniform(
                 clip.rect.max.x,
                 clip.rect.max.y,
             );
-            clip_transform_x[index] = Vec4::new(
-                clip.world_to_clip_local.matrix2.x_axis.x,
-                clip.world_to_clip_local.matrix2.y_axis.x,
-                clip.world_to_clip_local.translation.x,
-                0.0,
-            );
-            clip_transform_y[index] = Vec4::new(
-                clip.world_to_clip_local.matrix2.x_axis.y,
-                clip.world_to_clip_local.matrix2.y_axis.y,
-                clip.world_to_clip_local.translation.y,
-                0.0,
-            );
+            let transform = Mat3::from(clip.world_to_clip_local);
+            clip_transform_x[index] = transform.row(0).extend(0.0);
+            clip_transform_y[index] = transform.row(1).extend(0.0);
         }
         MeshGradientClipUniform {
             metadata: UVec4::new(clip_rects.len() as u32, 0, 0, 0),
@@ -1518,19 +1509,10 @@ fn build_mesh_gradient_style_uniform(
         NodeType::Border(flags) => flags,
         NodeType::Rect | NodeType::Inverted => 0,
     };
+    let transform = Mat3::from(gradient.transform);
     let style = MeshGradientStyleUniform {
-        transform_x: Vec4::new(
-            gradient.transform.matrix2.x_axis.x,
-            gradient.transform.matrix2.y_axis.x,
-            gradient.transform.translation.x,
-            0.0,
-        ),
-        transform_y: Vec4::new(
-            gradient.transform.matrix2.x_axis.y,
-            gradient.transform.matrix2.y_axis.y,
-            gradient.transform.translation.y,
-            0.0,
-        ),
+        transform_x: transform.row(0).extend(0.0),
+        transform_y: transform.row(1).extend(0.0),
         radius_x: Vec4::from_array(radius[0]),
         radius_y: Vec4::from_array(radius[1]),
         border: Vec4::new(
@@ -1788,7 +1770,7 @@ mod tests {
     use super::*;
     use bevy_asset::{uuid::Uuid, AssetId};
     use bevy_color::{Color, ColorToComponents, Hsla, Hsva, Okhsla, Oklcha};
-    use bevy_math::Vec4Swizzles;
+    use bevy_math::{Mat2, Vec4Swizzles};
     use bevy_shader::{ShaderCache, ShaderCacheSource};
     use bevy_ui::{CalculatedClipRect, MeshGradientPoint};
     use smallvec::SmallVec;
@@ -2065,7 +2047,7 @@ mod tests {
             QualityState::default()
                 .update(
                     &Arc::new(SurfaceBounds::new(mesh)),
-                    compute_physical_axes(Vec2::splat(64.0), bevy_math::Mat2::IDENTITY),
+                    compute_physical_axes(Vec2::splat(64.0), Mat2::IDENTITY),
                 )
                 .key
         };
@@ -2425,22 +2407,33 @@ mod tests {
     fn clipping_uses_its_own_optional_uniform() {
         let clip_rect = CalculatedClipRect {
             rect: Rect::from_corners(Vec2::new(2.0, 3.0), Vec2::new(17.0, 19.0)),
-            world_to_clip_local: Affine2::from_translation(Vec2::new(5.0, 7.0)),
+            world_to_clip_local: Affine2::from_mat2_translation(
+                Mat2::from_cols(Vec2::new(2.0, 3.0), Vec2::new(5.0, 7.0)),
+                Vec2::new(11.0, 13.0),
+            ),
         };
-        let (style, clip) = build_mesh_gradient_style_uniform(
-            &create_extracted_gradient(Some(CalculatedClip::Rects(SmallVec::from_iter([
+        let mut gradient =
+            create_extracted_gradient(Some(CalculatedClip::Rects(SmallVec::from_iter([
                 clip_rect,
-            ])))),
-            &create_full_capacity_mesh(),
-        )
-        .unwrap();
+            ]))));
+        gradient.transform = Affine2::from_mat2_translation(
+            Mat2::from_cols(Vec2::new(-2.0, 3.0), Vec2::new(5.0, 7.0)),
+            Vec2::new(11.0, 13.0),
+        );
+        let (style, clip) =
+            build_mesh_gradient_style_uniform(&gradient, &create_full_capacity_mesh()).unwrap();
         let clip = clip.unwrap();
 
         assert_eq!(style.metadata.z, 0);
         assert_eq!(clip.metadata.x, 1);
         assert_eq!(clip.clip_rects[0], Vec4::new(2.0, 3.0, 17.0, 19.0));
-        assert_eq!(clip.clip_transform_x[0].z, 5.0);
-        assert_eq!(clip.clip_transform_y[0].z, 7.0);
+        // A non-axis-aligned transform must preserve row/column ordering in
+        // both uniforms, including a mirrored node and each translation.
+        let point = Vec4::new(17.0, 19.0, 1.0, 0.0);
+        assert_eq!(clip.clip_transform_x[0].dot(point), 140.0);
+        assert_eq!(clip.clip_transform_y[0].dot(point), 197.0);
+        assert_eq!(style.transform_x.dot(point), 72.0);
+        assert_eq!(style.transform_y.dot(point), 197.0);
     }
 
     #[test]

@@ -359,9 +359,9 @@ fn spawn_editor(commands: &mut Commands, state: &EditorState) {
 }
 
 fn spawn_preview_column(parent: &mut ChildSpawnerCommands, state: &EditorState, kind: PreviewKind) {
-    let (title, editable) = match kind {
-        PreviewKind::Background => ("BACKGROUND / EDITABLE", true),
-        PreviewKind::Border => ("BORDER / SYNCHRONIZED", false),
+    let title = match kind {
+        PreviewKind::Background => "BACKGROUND / EDITABLE",
+        PreviewKind::Border => "BORDER / SYNCHRONIZED",
     };
     parent
         .spawn((
@@ -380,16 +380,11 @@ fn spawn_preview_column(parent: &mut ChildSpawnerCommands, state: &EditorState, 
                 TextFont::from_font_size(13.0),
                 TextColor(MUTED),
             ));
-            spawn_preview(column, state, kind, editable);
+            spawn_preview(column, state, kind);
         });
 }
 
-fn spawn_preview(
-    parent: &mut ChildSpawnerCommands,
-    state: &EditorState,
-    kind: PreviewKind,
-    editable: bool,
-) {
+fn spawn_preview(parent: &mut ChildSpawnerCommands, state: &EditorState, kind: PreviewKind) {
     let show = match kind {
         PreviewKind::Background => state.show_background,
         PreviewKind::Border => state.show_border,
@@ -416,7 +411,7 @@ fn spawn_preview(
             _ => vec![],
         }),
     ));
-    if editable {
+    if matches!(kind, PreviewKind::Background) {
         entity.insert(EditorCanvas).with_children(|preview| {
             let (width, height) = state.mesh.dimensions();
             for row in 0..height {
@@ -974,7 +969,6 @@ type ControlPointVisuals<'w, 's> = Query<
         &'static mut Node,
         &'static mut UiTransform,
         &'static mut BackgroundColor,
-        &'static mut BorderColor,
     ),
 >;
 
@@ -1032,7 +1026,7 @@ fn sync_editor(
         }
     }
 
-    for (marker, mut node, mut transform, mut color, mut border) in &mut points {
+    for (marker, mut node, mut transform, mut color) in &mut points {
         let point = &state.mesh.points()[marker.0];
         let selected = marker.0 == state.selected;
         let diameter = if selected { 22.0 } else { 17.0 };
@@ -1048,7 +1042,6 @@ fn sync_editor(
         };
         transform.translation = Val2::px(-diameter / 2.0, -diameter / 2.0);
         color.0 = point.color;
-        border.set_all(Color::WHITE);
     }
 
     let edge_display = if state.show_debug_ui {
