@@ -7,9 +7,6 @@ import package::gradient_color::convert_to_linear_rgba;
 import bevy_render::color_operations::oklab_to_linear_rgb;
 import bevy_render::maths::PI_2;
 
-const MAX_POINTS: u32 = 256u;
-const MAX_CLIPS: u32 = 128u;
-
 struct MeshGradientPoints {
     positions: array<vec4<f32>, 256>,
     colors: array<vec4<f32>, 256>,
@@ -40,7 +37,7 @@ struct MeshGradientClip {
 @group(1) @binding(2) var<uniform> clips: MeshGradientClip;
 
 struct MeshVertexOutput {
-    @if(MESH_PARAMETER_UV)
+    @if(BICUBIC_COLOR || HUE_COLOR)
     @location(0) uv: vec2<f32>,
     @if(VERTEX_COLOR)
     @location(1) interpolation_color: vec4<f32>,
@@ -53,7 +50,7 @@ struct MeshVertexOutput {
 };
 
 fn compute_point_index(x: u32, y: u32) -> u32 {
-    return min(y * mesh.metadata.x + x, MAX_POINTS - 1u);
+    return y * mesh.metadata.x + x;
 }
 
 fn unpack_bytes(value: u32) -> vec4<u32> {
@@ -421,7 +418,7 @@ fn vertex(
     );
     var out: MeshVertexOutput;
     out.position = position_world_to_clip(vec3(world_point, 0.0), view.clip_from_world);
-@if(MESH_PARAMETER_UV)
+@if(BICUBIC_COLOR || HUE_COLOR)
     out.uv = uv;
 @if(VERTEX_COLOR)
     out.interpolation_color = evaluate_bilinear_surface_color(patch_index, uv);
@@ -436,7 +433,7 @@ fn vertex(
 @if(MESH_CLIPPED)
 fn is_outside_clip(world_point: vec2<f32>) -> bool {
     let homogeneous = vec3(world_point, 1.0);
-    for (var index = 0u; index < min(clips.metadata.x, MAX_CLIPS); index += 1u) {
+    for (var index = 0u; index < clips.metadata.x; index += 1u) {
         let local = vec2(
             dot(clips.clip_transform_x[index].xyz, homogeneous),
             dot(clips.clip_transform_y[index].xyz, homogeneous),

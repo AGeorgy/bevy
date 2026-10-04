@@ -10,9 +10,8 @@
 //! refinement. Vertex color mode adds an exact bilinear color-error term, so it
 //! spends triangles only where the rasterizer would reveal a patch diagonal.
 
-use bevy_color::Color;
+use crate::gradient::convert_color_to_space;
 use bevy_math::{DVec2, Mat2, Vec2};
-use bevy_platform::{collections::HashMap, sync::Arc};
 use bevy_ui::{MeshGradient, MeshGradientColorInterpolation};
 use bytemuck::{Pod, Zeroable};
 use smallvec::SmallVec;
@@ -27,10 +26,6 @@ const MIN_SUBDIVISIONS: usize = 2;
 const MAX_TRIANGLES: usize = 131_072;
 const MAX_SUBDIVISIONS: usize = 64;
 const DEMOTION_FRAMES: u8 = 8;
-
-pub(crate) fn convert_mesh_color_for_interpolation(mesh: &MeshGradient, color: Color) -> [f32; 4] {
-    crate::gradient::convert_color_to_space(color, mesh.color_space().into())
-}
 
 #[cfg(test)]
 type Point = [f64; 6];
@@ -268,75 +263,59 @@ pub(crate) struct ParameterTopology {
     pub indices: Vec<u32>,
 }
 
-#[derive(Default)]
-pub(crate) struct TopologyCache {
-    entries: HashMap<TopologyKey, Arc<ParameterTopology>>,
-}
-
-impl TopologyCache {
-    pub fn get(&mut self, key: &TopologyKey) -> Arc<ParameterTopology> {
-        self.entries
-            .entry(key.clone())
-            .or_insert_with(|| {
-                let mut vertices = Vec::new();
-                let mut indices = Vec::with_capacity(key.count_triangles() * 3);
-                for row in 0..key.height - 1 {
-                    for column in 0..key.width - 1 {
-                        let columns = key.u_subdivisions(column, row);
-                        let rows = key.v_subdivisions(column, row);
-                        let base = vertices.len() as u32;
-                        for y in 0..=rows {
-                            for x in 0..=columns {
-                                let mut position_columns = columns;
-                                let mut position_rows = rows;
-                                if y > 0 && y < rows {
-                                    if x == 0 && column > 0 {
-                                        position_rows =
-                                            position_rows.min(key.v_subdivisions(column - 1, row));
-                                    }
-                                    if x == columns && column + 1 < key.width - 1 {
-                                        position_rows =
-                                            position_rows.min(key.v_subdivisions(column + 1, row));
-                                    }
-                                }
-                                if x > 0 && x < columns {
-                                    if y == 0 && row > 0 {
-                                        position_columns = position_columns
-                                            .min(key.u_subdivisions(column, row - 1));
-                                    }
-                                    if y == rows && row + 1 < key.height - 1 {
-                                        position_columns = position_columns
-                                            .min(key.u_subdivisions(column, row + 1));
-                                    }
-                                }
-                                vertices.push(ParameterVertex::new(
-                                    [column, row],
-                                    [x, y],
-                                    [columns, rows],
-                                    [position_columns, position_rows],
-                                ));
+impl ParameterTopology {
+    pub fn new(key: &TopologyKey) -> Self {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::with_capacity(key.count_triangles() * 3);
+        for row in 0..key.height - 1 {
+            for column in 0..key.width - 1 {
+                let columns = key.u_subdivisions(column, row);
+                let rows = key.v_subdivisions(column, row);
+                let base = vertices.len() as u32;
+                for y in 0..=rows {
+                    for x in 0..=columns {
+                        let mut position_columns = columns;
+                        let mut position_rows = rows;
+                        if y > 0 && y < rows {
+                            if x == 0 && column > 0 {
+                                position_rows =
+                                    position_rows.min(key.v_subdivisions(column - 1, row));
+                            }
+                            if x == columns && column + 1 < key.width - 1 {
+                                position_rows =
+                                    position_rows.min(key.v_subdivisions(column + 1, row));
                             }
                         }
-                        for y in 0..rows {
-                            for x in 0..columns {
-                                let a = base + (y * (columns + 1) + x) as u32;
-                                let b = a + 1;
-                                let c = a + (columns + 1) as u32;
-                                let d = c + 1;
-                                indices.extend_from_slice(&[a, b, d, a, d, c]);
+                        if x > 0 && x < columns {
+                            if y == 0 && row > 0 {
+                                position_columns =
+                                    position_columns.min(key.u_subdivisions(column, row - 1));
+                            }
+                            if y == rows && row + 1 < key.height - 1 {
+                                position_columns =
+                                    position_columns.min(key.u_subdivisions(column, row + 1));
                             }
                         }
+                        vertices.push(ParameterVertex::new(
+                            [column, row],
+                            [x, y],
+                            [columns, rows],
+                            [position_columns, position_rows],
+                        ));
                     }
                 }
-                Arc::new(ParameterTopology { vertices, indices })
-            })
-            .clone()
-    }
-
-    /// Release entries no live gradient uses. Call after all frame lookups.
-    pub fn prune(&mut self) {
-        self.entries
-            .retain(|_, topology| Arc::strong_count(topology) > 1);
+                for y in 0..rows {
+                    for x in 0..columns {
+                        let a = base + (y * (columns + 1) + x) as u32;
+                        let b = a + 1;
+                        let c = a + (columns + 1) as u32;
+                        let d = c + 1;
+                        indices.extend_from_slice(&[a, b, d, a, d, c]);
+                    }
+                }
+            }
+        }
+        Self { vertices, indices }
     }
 }
 
@@ -360,7 +339,6 @@ impl ErrorBound {
 pub(crate) struct QualitySelection {
     pub key: TopologyKey,
     pub error: ErrorBound,
-    pub capped: bool,
     /// Emit a diagnostic on entry to the capped state, not on every frame.
     pub report_cap: bool,
 }
@@ -434,7 +412,6 @@ impl QualityState {
         QualitySelection {
             key: chosen,
             error,
-            capped,
             report_cap,
         }
     }
@@ -571,7 +548,9 @@ impl SurfaceBounds {
         .then(|| {
             mesh.points()
                 .iter()
-                .map(|point| convert_mesh_color_for_interpolation(mesh, point.color).map(f64::from))
+                .map(|point| {
+                    convert_color_to_space(point.color, mesh.color_space().into()).map(f64::from)
+                })
                 .collect()
         });
         let interval_patches: SmallVec<[IntervalPatch<2>; 9]> =
@@ -1036,6 +1015,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy_color::Color;
     use bevy_math::Vec2;
     use bevy_ui::{MeshGradientColorSpace, MeshGradientGeometry, MeshGradientPoint};
 
@@ -1044,7 +1024,7 @@ mod tests {
             .points()
             .iter()
             .map(|point| {
-                let color = convert_mesh_color_for_interpolation(mesh, point.color);
+                let color = convert_color_to_space(point.color, mesh.color_space().into());
                 [
                     point.position.x as f64,
                     point.position.y as f64,
@@ -1129,7 +1109,7 @@ mod tests {
         mesh.points()
             .iter()
             .map(|point| {
-                let color = convert_mesh_color_for_interpolation(mesh, point.color);
+                let color = convert_color_to_space(point.color, mesh.color_space().into());
                 [
                     point.position.x,
                     point.position.y,
@@ -1331,7 +1311,7 @@ mod tests {
         let large = state.update(&curved, create_screen_axes(4096.0));
         assert!(small.key.find_maximum_subdivisions() > 1);
         assert!(large.key.count_triangles() > small.key.count_triangles());
-        assert!(!large.capped);
+        assert!(large.error.meets_tolerance(GEOMETRY_LIMIT, 1.0));
     }
 
     #[test]
@@ -1390,8 +1370,10 @@ mod tests {
         ] {
             let mut grid = create_test_mesh(2, 0.0, 1.0, space);
             for hue in [10.0, 350.0] {
-                let color =
-                    convert_mesh_color_for_interpolation(&grid, Color::hsva(hue, 0.7, 0.8, 0.5));
+                let color = convert_color_to_space(
+                    Color::hsva(hue, 0.7, 0.8, 0.5),
+                    grid.color_space().into(),
+                );
                 for (actual, expected) in color.into_iter().zip([hue / 360.0, 0.7, 0.8, 0.5]) {
                     assert!((actual - expected).abs() < 1e-5);
                 }
@@ -1505,7 +1487,7 @@ mod tests {
                 .find_maximum_subdivisions(),
             16
         );
-        // Four subdivisions meets_tolerance the full limit, but only eight meets_tolerance half.
+        // Four subdivisions meet the full limit, but only eight meet half.
         for _ in 0..7 {
             assert_eq!(
                 state
@@ -1551,7 +1533,8 @@ mod tests {
         ));
         let mut state = QualityState::default();
         let selection = state.update(&bounds, create_screen_axes(1e10));
-        assert!(selection.capped && selection.report_cap);
+        assert!(!selection.error.meets_tolerance(GEOMETRY_LIMIT, 1.0));
+        assert!(selection.report_cap);
         assert!(selection.key.count_triangles() <= MAX_TRIANGLES);
         assert!(selection.key.find_maximum_subdivisions() <= MAX_SUBDIVISIONS);
         assert!(!state.update(&bounds, create_screen_axes(1e10)).report_cap);
@@ -1591,12 +1574,10 @@ mod tests {
     fn point_edits_reuse_selected_topology_and_grid_changes_reset_state() {
         let mut grid = create_test_mesh(3, 0.02, 1.0, MeshGradientColorSpace::LinearRgba);
         let mut state = QualityState::default();
-        let mut cache = TopologyCache::default();
         let first = state.update(&SurfaceBounds::new(&grid), create_screen_axes(512.0));
-        let topology = cache.get(&first.key);
         grid.try_set_position(4, Vec2::new(0.52001, 0.5)).unwrap();
         let next = state.update(&SurfaceBounds::new(&grid), create_screen_axes(512.0));
-        assert!(Arc::ptr_eq(&topology, &cache.get(&next.key)));
+        assert_eq!(first.key, next.key);
         let replacement = create_test_mesh(16, 0.0, 1.0, MeshGradientColorSpace::LinearRgba);
         let changed = state.update(&SurfaceBounds::new(&replacement), create_screen_axes(512.0));
         assert_eq!(changed.key.width, 16);
@@ -1604,18 +1585,15 @@ mod tests {
     }
 
     #[test]
-    fn topology_reuses_point_edits_and_releases_unused_entries() {
+    fn topology_packs_vertices_and_preserves_shared_edges() {
         assert_eq!(size_of::<ParameterVertex>(), 8);
-        let mut cache = TopologyCache::default();
         let key = TopologyKey::new_uniform(3, 3, 8);
-        let first = cache.get(&key);
-        let second = cache.get(&key);
-        assert!(Arc::ptr_eq(&first, &second));
-        assert_eq!(first.indices.len() / 3, key.count_triangles());
+        let topology = ParameterTopology::new(&key);
+        assert_eq!(topology.indices.len() / 3, key.count_triangles());
         let stride = 9 * 9;
         for y in 0..=8 {
-            let left = first.vertices[y * 9 + 8];
-            let right = first.vertices[stride + y * 9];
+            let left = topology.vertices[y * 9 + 8];
+            let right = topology.vertices[stride + y * 9];
             let (left_patch, left_uv, _, _) = left.unpack();
             let (right_patch, right_uv, _, _) = right.unpack();
             assert_eq!(
@@ -1624,12 +1602,6 @@ mod tests {
             );
             assert_eq!(left_uv[1].to_bits(), right_uv[1].to_bits());
         }
-        cache.prune();
-        assert_eq!(cache.entries.len(), 1);
-        drop(first);
-        drop(second);
-        cache.prune();
-        assert!(cache.entries.is_empty());
     }
 
     #[test]
@@ -1665,7 +1637,7 @@ mod tests {
         assert_eq!(selection.key.v_subdivisions(0, 0), MIN_SUBDIVISIONS);
         assert_eq!(selection.key.count_triangles(), 40);
         assert_eq!(TopologyKey::new_uniform(3, 2, 8).count_triangles(), 256);
-        assert!(!selection.capped);
+        assert!(selection.error.meets_tolerance(GEOMETRY_LIMIT, 1.0));
     }
 
     #[test]
@@ -1679,7 +1651,7 @@ mod tests {
             .unwrap()
             .try_double_v_subdivisions(0, 0)
             .unwrap();
-        let topology = TopologyCache::default().get(&key);
+        let topology = ParameterTopology::new(&key);
         let fine_right: Vec<_> = topology
             .vertices
             .iter()
@@ -1758,7 +1730,7 @@ mod tests {
         );
         assert!(selection.key.count_triangles() <= MAX_TRIANGLES);
         assert!(selection.error.geometry <= GEOMETRY_LIMIT);
-        assert!(!selection.capped);
+        assert!(selection.error.meets_tolerance(GEOMETRY_LIMIT, 1.0));
     }
 
     fn evaluate_reference_patch(patch: &Patch, uv: DVec2) -> Point {
@@ -1850,7 +1822,7 @@ mod tests {
                 ] {
                     let chosen = QualityState::default().update(&bounds, screen_axes);
                     assert!(
-                        !chosen.capped,
+                        chosen.error.meets_tolerance(GEOMETRY_LIMIT, 1.0),
                         "size={size}, screen={screen}, error={:?}",
                         chosen.error
                     );

@@ -326,7 +326,12 @@ pub enum MeshGradientError {
 #[derive(Clone, Debug, PartialEq, Reflect)]
 #[reflect(opaque)]
 #[reflect(Clone, PartialEq, Debug)]
-#[cfg_attr(feature = "serialize", reflect(Serialize, Deserialize))]
+#[cfg_attr(
+    feature = "serialize",
+    derive(serde::Serialize),
+    serde(rename(serialize = "SerializedMeshGradientRef")),
+    reflect(Serialize, Deserialize)
+)]
 pub struct MeshGradient {
     width: usize,
     height: usize,
@@ -760,59 +765,41 @@ impl Interval {
 
     fn add(self, other: Self) -> Self {
         Self {
-            lo: round_down(self.lo + other.lo),
-            hi: round_up(self.hi + other.hi),
+            lo: (self.lo + other.lo).next_down(),
+            hi: (self.hi + other.hi).next_up(),
         }
     }
 
     fn sub(self, other: Self) -> Self {
         Self {
-            lo: round_down(self.lo - other.hi),
-            hi: round_up(self.hi - other.lo),
+            lo: (self.lo - other.hi).next_down(),
+            hi: (self.hi - other.lo).next_up(),
         }
     }
 
     fn scale(self, factor: f64) -> Self {
         if factor >= 0.0 {
             Self {
-                lo: round_down(self.lo * factor),
-                hi: round_up(self.hi * factor),
+                lo: (self.lo * factor).next_down(),
+                hi: (self.hi * factor).next_up(),
             }
         } else {
             Self {
-                lo: round_down(self.hi * factor),
-                hi: round_up(self.lo * factor),
+                lo: (self.hi * factor).next_down(),
+                hi: (self.lo * factor).next_up(),
             }
         }
     }
 
     fn divide(self, divisor: f64) -> Self {
         Self {
-            lo: round_down(self.lo / divisor),
-            hi: round_up(self.hi / divisor),
+            lo: (self.lo / divisor).next_down(),
+            hi: (self.hi / divisor).next_up(),
         }
     }
 }
 
 type Control = [Interval; 6];
-
-fn round_down(value: f64) -> f64 {
-    if value == f64::NEG_INFINITY {
-        value
-    } else if value == 0.0 {
-        -f64::from_bits(1)
-    } else {
-        f64::from_bits(if value > 0.0 {
-            value.to_bits() - 1
-        } else {
-            value.to_bits() + 1
-        })
-    }
-}
-
-fn round_up(value: f64) -> f64 {
-    -round_down(-value)
-}
 
 fn add_controls(left: Control, right: Control) -> Control {
     core::array::from_fn(|index| left[index].add(right[index]))
@@ -925,8 +912,8 @@ fn certify_patch(
         }
     }
 
-    let off_diagonal = round_up(round_up(xy + yx) * 0.5);
-    let determinant = round_down(round_down(xx * yy) - round_up(off_diagonal * off_diagonal));
+    let off_diagonal = ((xy + yx).next_up() * 0.5).next_up();
+    let determinant = ((xx * yy).next_down() - (off_diagonal * off_diagonal).next_up()).next_down();
     if xx > 0.0 && yy > 0.0 && determinant > 0.0 && determinant.is_finite() {
         Ok(())
     } else {
@@ -935,18 +922,8 @@ fn certify_patch(
 }
 
 #[cfg(feature = "serialize")]
-#[derive(serde::Serialize)]
-struct SerializedMeshGradientRef<'a> {
-    width: usize,
-    height: usize,
-    points: &'a [MeshGradientPoint],
-    color_space: MeshGradientColorSpace,
-    color_interpolation: MeshGradientColorInterpolation,
-    geometry: MeshGradientGeometry,
-}
-
-#[cfg(feature = "serialize")]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
 struct SerializedMeshGradient {
     width: usize,
     height: usize,
@@ -956,24 +933,6 @@ struct SerializedMeshGradient {
     color_interpolation: MeshGradientColorInterpolation,
     #[serde(default)]
     geometry: MeshGradientGeometry,
-}
-
-#[cfg(feature = "serialize")]
-impl serde::Serialize for MeshGradient {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        SerializedMeshGradientRef {
-            width: self.width,
-            height: self.height,
-            points: &self.points,
-            color_space: self.color_space,
-            color_interpolation: self.color_interpolation,
-            geometry: self.geometry,
-        }
-        .serialize(serializer)
-    }
 }
 
 #[cfg(feature = "serialize")]

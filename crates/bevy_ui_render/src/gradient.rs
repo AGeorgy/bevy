@@ -7,8 +7,8 @@ use core::{
 use super::shader_flags::BORDER_ALL;
 use crate::clipping::clip_polygon;
 use crate::mesh_gradient::{
-    compute_physical_axes, convert_mesh_color_for_interpolation, ParameterVertex, QualityState,
-    SurfaceBounds, TopologyCache, TopologyKey,
+    compute_physical_axes, ParameterTopology, ParameterVertex, QualityState, SurfaceBounds,
+    TopologyKey,
 };
 use crate::*;
 use bevy_asset::*;
@@ -235,9 +235,6 @@ fn build_gradient_shader_defs(key: UiGradientPipelineKey) -> Vec<ShaderDefVal> {
     let hue_based = MeshGradientColorSpace::from(key.color_space).is_hue_based();
     if hue_based {
         shader_defs.push("HUE_COLOR".into());
-    }
-    if hue_based || key.mesh_color_interpolation == MeshGradientColorInterpolation::Bicubic {
-        shader_defs.push("MESH_PARAMETER_UV".into());
     }
     let interpolation = match key.mesh_color_interpolation {
         MeshGradientColorInterpolation::Vertex if hue_based => "BILINEAR_COLOR",
@@ -1316,7 +1313,6 @@ impl MeshGradientBindingCache {
 
 #[derive(Resource, Default)]
 struct GpuMeshTopologyCache {
-    cpu: TopologyCache,
     entries: HashMap<TopologyKey, Arc<GpuParameterTopology>>,
 }
 
@@ -1329,7 +1325,7 @@ impl GpuMeshTopologyCache {
         if let Some(topology) = self.entries.get(key) {
             return topology.clone();
         }
-        let topology = self.cpu.get(key);
+        let topology = ParameterTopology::new(key);
         let (indices, index_format) = if topology.vertices.len() <= u16::MAX as usize + 1 {
             let indices: Vec<u16> = topology
                 .indices
@@ -1374,7 +1370,6 @@ impl GpuMeshTopologyCache {
     fn prune(&mut self) {
         self.entries
             .retain(|_, topology| Arc::strong_count(topology) > 1);
-        self.cpu.prune();
     }
 }
 
@@ -1405,7 +1400,10 @@ fn build_mesh_gradient_points_uniform(mesh: &MeshGradient) -> MeshGradientPoints
     );
     for (index, point) in mesh.points().iter().enumerate() {
         positions[index] = point.position.extend(0.0).extend(0.0);
-        colors[index] = Vec4::from_array(convert_mesh_color_for_interpolation(mesh, point.color));
+        colors[index] = Vec4::from_array(convert_color_to_space(
+            point.color,
+            mesh.color_space().into(),
+        ));
         if uses_okhsl {
             let lab = Oklaba::from(point.color);
             positions[index].z = lab.lightness;
@@ -1502,9 +1500,6 @@ fn build_mesh_gradient_style_uniform(
         || size.x <= 0.0
         || size.y <= 0.0
         || !is_affine_transform_finite(gradient.transform)
-        || mesh.points().len() != mesh.width() * mesh.height()
-        || mesh.width() > MAX_MESH_GRADIENT_DIMENSION
-        || mesh.height() > MAX_MESH_GRADIENT_DIMENSION
     {
         return Err(MeshUniformError::Invalid);
     }
@@ -1647,7 +1642,7 @@ fn prepare_mesh_gradients(
                 .entry(mesh.id)
                 .or_default()
                 .update(&mesh.bounds, axes);
-            if selection.capped && selection.report_cap {
+            if selection.report_cap {
                 warn!(
                     "mesh gradient reached its adaptive tessellation cap: {} triangles, maximum axis subdivision {}, geometry error {:.3}px, color error {:.4}",
                     selection.key.count_triangles(),
