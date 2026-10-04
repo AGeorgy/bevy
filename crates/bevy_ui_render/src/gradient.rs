@@ -65,11 +65,9 @@ impl Plugin for GradientPlugin {
                 .add_render_command::<TransparentUi, DrawGradientFns>()
                 .add_render_command::<TransparentUi, DrawMeshGradientFns>()
                 .init_resource::<ExtractedGradients>()
-                .init_resource::<MeshGradientQualityCache>()
                 .init_resource::<MeshGradientSurfaceCache>()
                 .init_resource::<MeshGradientBindingCache>()
                 .init_resource::<GpuMeshTopologyCache>()
-                .init_resource::<MeshGradientDiagnostics>()
                 .init_gpu_resource::<GradientMeta>()
                 .init_gpu_resource::<SpecializedRenderPipelines<GradientPipeline>>()
                 .add_systems(RenderStartup, init_gradient_pipeline)
@@ -1165,6 +1163,7 @@ const _: () = assert!(MeshGradientStyleUniform::SHADER_SIZE.get() <= 16 * 1024);
 const _: () = assert!(MeshGradientClipUniform::SHADER_SIZE.get() <= 16 * 1024);
 
 struct GpuParameterTopology {
+    key: TopologyKey,
     vertices: Buffer,
     indices: Buffer,
     index_format: IndexFormat,
@@ -1175,12 +1174,6 @@ struct GpuParameterTopology {
 pub(crate) struct MeshGradientGpu {
     bind_group: BindGroup,
     topology: Arc<GpuParameterTopology>,
-    topology_key: TopologyKey,
-}
-
-#[derive(Resource, Default)]
-struct MeshGradientQualityCache {
-    states: HashMap<MeshGradientId, QualityState>,
 }
 
 struct CachedMeshGradientBindings {
@@ -1322,6 +1315,7 @@ impl GpuMeshTopologyCache {
             )
         };
         let gpu = Arc::new(GpuParameterTopology {
+            key: key.clone(),
             vertices: render_device.create_buffer_with_data(&BufferInitDescriptor {
                 label: Some("ui_mesh_gradient_parameter_vertices"),
                 contents: cast_slice::<ParameterVertex, u8>(&topology.vertices),
@@ -1338,11 +1332,6 @@ impl GpuMeshTopologyCache {
 
 fn prune_unused_mesh_topologies<T>(entries: &mut HashMap<TopologyKey, Arc<T>>) {
     entries.retain(|_, topology| Arc::strong_count(topology) > 1);
-}
-
-#[derive(Resource, Default)]
-struct MeshGradientDiagnostics {
-    invalid: HashSet<MeshGradientId>,
 }
 
 #[derive(Debug)]
@@ -1486,12 +1475,7 @@ fn build_mesh_gradient_style_uniform(
         let mut clip_transform_x = [Vec4::ZERO; MAX_MESH_GRADIENT_CLIPS];
         let mut clip_transform_y = [Vec4::ZERO; MAX_MESH_GRADIENT_CLIPS];
         for (index, clip) in clip_rects.iter().enumerate() {
-            uniform_clip_rects[index] = Vec4::new(
-                clip.rect.min.x,
-                clip.rect.min.y,
-                clip.rect.max.x,
-                clip.rect.max.y,
-            );
+            uniform_clip_rects[index] = Vec4::from((clip.rect.min, clip.rect.max));
             let transform = Mat3::from(clip.world_to_clip_local);
             clip_transform_x[index] = transform.row(0).extend(0.0);
             clip_transform_y[index] = transform.row(1).extend(0.0);
@@ -1515,12 +1499,7 @@ fn build_mesh_gradient_style_uniform(
         transform_y: transform.row(1).extend(0.0),
         radius_x: Vec4::from_array(radius[0]),
         radius_y: Vec4::from_array(radius[1]),
-        border: Vec4::new(
-            gradient.border.min_inset.x,
-            gradient.border.min_inset.y,
-            gradient.border.max_inset.x,
-            gradient.border.max_inset.y,
-        ),
+        border: Vec4::from((gradient.border.min_inset, gradient.border.max_inset)),
         size: size.extend(0.0).extend(0.0),
         metadata: UVec4::new(mesh.width() as u32, mesh.height() as u32, 0, flags),
     };
@@ -1539,22 +1518,25 @@ fn prepare_mesh_gradients(
     gradients_pipeline: Res<GradientPipeline>,
     extracted_gradients: Res<ExtractedGradients>,
     phases: Res<ViewSortedRenderPhases<TransparentUi>>,
-    mut quality_cache: ResMut<MeshGradientQualityCache>,
+    mut quality_states: Local<HashMap<MeshGradientId, QualityState>>,
     mut surface_cache: ResMut<MeshGradientSurfaceCache>,
     mut binding_cache: ResMut<MeshGradientBindingCache>,
     mut topology_cache: ResMut<GpuMeshTopologyCache>,
-    mut diagnostics: ResMut<MeshGradientDiagnostics>,
+    mut invalid: Local<HashSet<MeshGradientId>>,
+    mut active: Local<HashSet<MeshGradientId>>,
     mut prepared: Query<&mut MeshGradientGpu>,
 ) {
-    let active: HashSet<_> = extracted_gradients
-        .items
-        .values()
-        .flat_map(|(_, gradients)| gradients.values())
-        .filter_map(|gradient| match &gradient.resolved_gradient {
-            ResolvedGradient::Mesh(mesh) => Some(mesh.id),
-            _ => None,
-        })
-        .collect();
+    active.clear();
+    active.extend(
+        extracted_gradients
+            .items
+            .values()
+            .flat_map(|(_, gradients)| gradients.values())
+            .filter_map(|gradient| match &gradient.resolved_gradient {
+                ResolvedGradient::Mesh(mesh) => Some(mesh.id),
+                _ => None,
+            }),
+    );
 
     for phase in phases.values() {
         for (_, item) in &phase.items {
@@ -1576,8 +1558,7 @@ fn prepare_mesh_gradients(
                 continue;
             }
             let axes = compute_physical_axes(gradient.rect.size(), gradient.transform.matrix2);
-            let selection = quality_cache
-                .states
+            let selection = quality_states
                 .entry(mesh.id)
                 .or_default()
                 .update(&mesh.bounds, axes);
@@ -1592,11 +1573,10 @@ fn prepare_mesh_gradients(
             }
 
             if let Ok(mut gpu) = prepared.get_mut(item.entity()) {
-                if gpu.topology_key != selection.key {
+                if gpu.topology.key != selection.key {
                     gpu.topology = topology_cache.get(&selection.key, &render_device);
-                    gpu.topology_key = selection.key.clone();
                 }
-                diagnostics.invalid.remove(&mesh.id);
+                invalid.remove(&mesh.id);
                 continue;
             }
 
@@ -1606,7 +1586,7 @@ fn prepare_mesh_gradients(
                 Ok(uniform) => uniform,
                 Err(MeshUniformError::FullyClipped) => continue,
                 Err(error) => {
-                    if diagnostics.invalid.insert(mesh.id) {
+                    if invalid.insert(mesh.id) {
                         match error {
                             MeshUniformError::TooManyClips(count) => warn!(
                                 "skipping mesh gradient with {count} inherited clip rectangles; the WebGL2-safe maximum is {MAX_MESH_GRADIENT_CLIPS}"
@@ -1640,9 +1620,8 @@ fn prepare_mesh_gradients(
             commands.entity(item.entity()).insert(MeshGradientGpu {
                 bind_group,
                 topology,
-                topology_key: selection.key,
             });
-            diagnostics.invalid.remove(&mesh.id);
+            invalid.remove(&mesh.id);
         }
     }
 
@@ -1650,10 +1629,10 @@ fn prepare_mesh_gradients(
     // current-frame owners before releasing entries with no remaining users.
     // Deferred component insertions already hold their topology references.
     prune_unused_mesh_topologies(&mut topology_cache.entries);
-    quality_cache.states.retain(|id, _| active.contains(id));
+    quality_states.retain(|id, _| active.contains(id));
     surface_cache.retain(&active);
     binding_cache.retain(&active);
-    diagnostics.invalid.retain(|id| active.contains(id));
+    invalid.retain(|id| active.contains(id));
 }
 
 pub type DrawGradientFns = (SetItemPipeline, SetGradientViewBindGroup<0>, DrawGradient);
@@ -2420,11 +2399,16 @@ mod tests {
             Mat2::from_cols(Vec2::new(-2.0, 3.0), Vec2::new(5.0, 7.0)),
             Vec2::new(11.0, 13.0),
         );
+        gradient.border = BorderRect {
+            min_inset: Vec2::new(2.0, 3.0),
+            max_inset: Vec2::new(5.0, 7.0),
+        };
         let (style, clip) =
             build_mesh_gradient_style_uniform(&gradient, &create_full_capacity_mesh()).unwrap();
         let clip = clip.unwrap();
 
         assert_eq!(style.metadata.z, 0);
+        assert_eq!(style.border, Vec4::new(2.0, 3.0, 5.0, 7.0));
         assert_eq!(clip.metadata.x, 1);
         assert_eq!(clip.clip_rects[0], Vec4::new(2.0, 3.0, 17.0, 19.0));
         // A non-axis-aligned transform must preserve row/column ordering in

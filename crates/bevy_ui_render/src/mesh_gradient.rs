@@ -310,13 +310,13 @@ pub(crate) struct ErrorBound {
 }
 
 impl ErrorBound {
-    fn meets_tolerance(self, maximum_error: f64, fraction: f64) -> bool {
-        self.geometry <= maximum_error * fraction
+    fn meets_tolerance(self, fraction: f64) -> bool {
+        self.geometry <= GEOMETRY_LIMIT * fraction
             && self.color <= multiply_round_up(COLOR_LIMIT, fraction)
     }
 
-    fn compute_severity(self, maximum_error: f64) -> f64 {
-        (self.geometry / maximum_error).max(self.color / COLOR_LIMIT)
+    fn compute_severity(self) -> f64 {
+        (self.geometry / GEOMETRY_LIMIT).max(self.color / COLOR_LIMIT)
     }
 }
 
@@ -331,7 +331,6 @@ pub(crate) struct QualitySelection {
 pub(crate) struct QualityState {
     key: Option<TopologyKey>,
     below_half: u8,
-    demotion_candidate: Option<TopologyKey>,
     capped: bool,
     report_cooldown: u8,
     screen_bounds: ScreenBounds,
@@ -351,14 +350,12 @@ impl QualityState {
             .cached_input
             .as_ref()
             .is_some_and(|(previous, axes)| Arc::ptr_eq(previous, bounds) && *axes == screen_axes);
-        let mut screen_bounds = core::mem::take(&mut self.screen_bounds);
         if !unchanged {
-            bounds.update_screen(screen_axes, &mut screen_bounds);
+            bounds.update_screen(screen_axes, &mut self.screen_bounds);
             self.cached_input = Some((Arc::clone(bounds), screen_axes));
             self.cached_error = None;
-            self.cached_demotion = None;
         }
-        let bounds = &screen_bounds;
+        let bounds = &self.screen_bounds;
         let (chosen, error);
         if let Some(previous) = self
             .key
@@ -368,13 +365,13 @@ impl QualityState {
             let previous_error = self
                 .cached_error
                 .unwrap_or_else(|| bounds.estimate_error_bound(previous));
-            if !previous_error.meets_tolerance(GEOMETRY_LIMIT, 1.0) {
+            if !previous_error.meets_tolerance(1.0) {
                 // An unchanged capped selection has already exhausted its
                 // permitted refinements. Its diagnostic still advances below.
                 chosen = if unchanged {
                     previous.clone()
                 } else {
-                    bounds.refine(previous.clone(), GEOMETRY_LIMIT, 1.0, None)
+                    bounds.refine(previous.clone(), 1.0, None)
                 };
                 error = if chosen == *previous {
                     previous_error
@@ -382,22 +379,23 @@ impl QualityState {
                     bounds.estimate_error_bound(&chosen)
                 };
                 self.below_half = 0;
-                self.demotion_candidate = None;
                 self.cached_demotion = None;
             } else {
-                let (candidate, candidate_error) = self.cached_demotion.get_or_insert_with(|| {
-                    let minimum =
-                        TopologyKey::new_uniform(bounds.width, bounds.height, MIN_SUBDIVISIONS);
-                    let candidate = bounds.refine(minimum, GEOMETRY_LIMIT, 0.5, Some(previous));
-                    let error = bounds.estimate_error_bound(&candidate);
-                    (candidate, error)
-                });
-                if self.demotion_candidate.as_ref() != Some(&*candidate) {
-                    self.below_half = 0;
-                }
-                self.demotion_candidate = Some(candidate.clone());
+                let (candidate, candidate_error) = match self.cached_demotion.take() {
+                    Some(cached) if unchanged => cached,
+                    cached => {
+                        let minimum =
+                            TopologyKey::new_uniform(bounds.width, bounds.height, MIN_SUBDIVISIONS);
+                        let candidate = bounds.refine(minimum, 0.5, Some(previous));
+                        let error = bounds.estimate_error_bound(&candidate);
+                        if cached.as_ref().map(|(previous, _)| previous) != Some(&candidate) {
+                            self.below_half = 0;
+                        }
+                        (candidate, error)
+                    }
+                };
                 if candidate.count_triangles() < previous.count_triangles()
-                    && candidate_error.meets_tolerance(GEOMETRY_LIMIT, 0.5)
+                    && candidate_error.meets_tolerance(0.5)
                 {
                     self.below_half += 1;
                 } else {
@@ -408,18 +406,18 @@ impl QualityState {
                     error = previous_error;
                 } else {
                     chosen = candidate.clone();
-                    error = *candidate_error;
+                    error = candidate_error;
                     self.below_half = 0;
                 }
+                self.cached_demotion = Some((candidate, candidate_error));
             }
         } else {
             let minimum = TopologyKey::new_uniform(bounds.width, bounds.height, MIN_SUBDIVISIONS);
-            chosen = bounds.refine(minimum, GEOMETRY_LIMIT, 1.0, None);
+            chosen = bounds.refine(minimum, 1.0, None);
             error = bounds.estimate_error_bound(&chosen);
             self.below_half = 0;
-            self.demotion_candidate = None;
         }
-        let capped = !error.meets_tolerance(GEOMETRY_LIMIT, 1.0);
+        let capped = !error.meets_tolerance(1.0);
         let report_cap = capped && !self.capped && self.report_cooldown == 0;
         if report_cap {
             self.report_cooldown = 120;
@@ -430,7 +428,6 @@ impl QualityState {
         }
         self.key = Some(chosen.clone());
         self.cached_error = Some(error);
-        self.screen_bounds = screen_bounds;
         QualitySelection {
             key: chosen,
             error,
@@ -798,7 +795,7 @@ impl ScreenBounds {
         for row in 0..self.height - 1 {
             for column in 0..self.width - 1 {
                 let patch_error = estimate_error(self, column, row, topology);
-                let severity = patch_error.compute_severity(GEOMETRY_LIMIT);
+                let severity = patch_error.compute_severity();
                 if severity > maximum_severity {
                     maximum_severity = severity;
                     worst_patch = [column, row];
@@ -824,14 +821,13 @@ impl ScreenBounds {
     fn refine(
         &self,
         topology: TopologyKey,
-        maximum_error: f64,
         fraction: f64,
         cap: Option<&TopologyKey>,
     ) -> TopologyKey {
-        let mut topology = self.refine_base(topology, maximum_error, fraction, cap);
+        let mut topology = self.refine_base(topology, fraction, cap);
         loop {
             let current = self.compute_error_score(&topology);
-            if current.bound.meets_tolerance(maximum_error, fraction) {
+            if current.bound.meets_tolerance(fraction) {
                 return topology;
             }
             let [column, row] = current.worst_patch;
@@ -870,13 +866,12 @@ impl ScreenBounds {
     fn refine_base(
         &self,
         mut topology: TopologyKey,
-        maximum_error: f64,
         fraction: f64,
         cap: Option<&TopologyKey>,
     ) -> TopologyKey {
         loop {
             let current = self.compute_base_error_score(&topology);
-            if current.bound.meets_tolerance(maximum_error, fraction) {
+            if current.bound.meets_tolerance(fraction) {
                 return topology;
             }
             let [column, row] = current.worst_patch;
@@ -1335,7 +1330,7 @@ mod tests {
         let large = state.update(&curved, create_screen_axes(4096.0));
         assert!(small.key.find_maximum_subdivisions() > 1);
         assert!(large.key.count_triangles() > small.key.count_triangles());
-        assert!(large.error.meets_tolerance(GEOMETRY_LIMIT, 1.0));
+        assert!(large.error.meets_tolerance(1.0));
     }
 
     #[test]
@@ -1488,6 +1483,40 @@ mod tests {
     }
 
     #[test]
+    fn demotion_accumulates_matching_candidates_across_input_changes() {
+        let curved = create_surface_bounds(&create_test_mesh(
+            3,
+            0.04,
+            0.0,
+            InterpolationColorSpace::LinearRgba,
+        ));
+        let flat = create_test_mesh(3, 0.0, 0.0, InterpolationColorSpace::LinearRgba);
+        let mut state = QualityState::default();
+        let high = state.update(&curved, create_screen_axes(4096.0)).key;
+        let minimum = TopologyKey::new_uniform(3, 3, MIN_SUBDIVISIONS);
+        assert!(high.count_triangles() > minimum.count_triangles());
+
+        // Rebuilding bounds and resizing invalidate the numerical cache each
+        // frame, but the same safe candidate must retain its demotion delay.
+        for frame in 1..DEMOTION_FRAMES {
+            let bounds = create_surface_bounds(&flat);
+            let axes = create_screen_axes(256.0 + f64::from(frame));
+            assert_eq!(state.update(&bounds, axes).key, high);
+            assert_eq!(state.below_half, frame);
+        }
+        assert_eq!(
+            state
+                .update(
+                    &create_surface_bounds(&flat),
+                    create_screen_axes(256.0 + f64::from(DEMOTION_FRAMES)),
+                )
+                .key,
+            minimum
+        );
+        assert_eq!(state.below_half, 0);
+    }
+
+    #[test]
     fn cached_quality_matches_rebuilt_bounds_through_frame_transitions() {
         fn compare_frames(
             mesh: &MeshGradient,
@@ -1575,7 +1604,7 @@ mod tests {
         let cap = create_test_mesh(16, 0.005, 1.0, InterpolationColorSpace::LinearRgba);
         let capped = compare_frames(&cap, create_screen_axes(1e10), 1, &mut cached, &mut rebuilt);
         assert!(capped.report_cap);
-        assert!(!capped.error.meets_tolerance(GEOMETRY_LIMIT, 1.0));
+        assert!(!capped.error.meets_tolerance(1.0));
         let stable_cap =
             compare_frames(&cap, create_screen_axes(1e10), 3, &mut cached, &mut rebuilt);
         assert!(!stable_cap.report_cap);
@@ -1663,7 +1692,7 @@ mod tests {
         ));
         let mut state = QualityState::default();
         let selection = state.update(&bounds, create_screen_axes(1e10));
-        assert!(!selection.error.meets_tolerance(GEOMETRY_LIMIT, 1.0));
+        assert!(!selection.error.meets_tolerance(1.0));
         assert!(selection.report_cap);
         assert!(selection.key.count_triangles() <= MAX_TRIANGLES);
         assert!(selection.key.find_maximum_subdivisions() <= MAX_SUBDIVISIONS);
@@ -1770,7 +1799,7 @@ mod tests {
         assert_eq!(selection.key.v_subdivisions(0, 0), MIN_SUBDIVISIONS);
         assert_eq!(selection.key.count_triangles(), 40);
         assert_eq!(TopologyKey::new_uniform(3, 2, 8).count_triangles(), 256);
-        assert!(selection.error.meets_tolerance(GEOMETRY_LIMIT, 1.0));
+        assert!(selection.error.meets_tolerance(1.0));
     }
 
     #[test]
@@ -1863,7 +1892,7 @@ mod tests {
         );
         assert!(selection.key.count_triangles() <= MAX_TRIANGLES);
         assert!(selection.error.geometry <= GEOMETRY_LIMIT);
-        assert!(selection.error.meets_tolerance(GEOMETRY_LIMIT, 1.0));
+        assert!(selection.error.meets_tolerance(1.0));
     }
 
     fn evaluate_reference_patch(patch: &Patch, uv: DVec2) -> Point {
@@ -2068,7 +2097,7 @@ mod tests {
                 ] {
                     let chosen = QualityState::default().update(&bounds, screen_axes);
                     assert!(
-                        chosen.error.meets_tolerance(GEOMETRY_LIMIT, 1.0),
+                        chosen.error.meets_tolerance(1.0),
                         "size={size}, screen={screen}, error={:?}",
                         chosen.error
                     );

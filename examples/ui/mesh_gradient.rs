@@ -972,6 +972,16 @@ type ControlPointVisuals<'w, 's> = Query<
     ),
 >;
 
+fn sync_preview(mut gradients: Mut<Vec<Gradient>>, mesh: &MeshGradient, visible: bool) {
+    if visible {
+        if !matches!(gradients.as_slice(), [Gradient::Mesh(current)] if current == mesh) {
+            *gradients = vec![mesh.clone().into()];
+        }
+    } else if !gradients.is_empty() {
+        gradients.clear();
+    }
+}
+
 fn sync_editor(
     mut commands: Commands,
     state: Res<EditorState>,
@@ -1000,30 +1010,17 @@ fn sync_editor(
         return;
     }
 
-    let current: Gradient = state.mesh.clone().into();
-    for (kind, mut background, mut border) in &mut previews {
-        match kind {
-            PreviewKind::Background => {
-                background.set_if_neq(BackgroundGradient(
-                    state
-                        .show_background
-                        .then(|| current.clone())
-                        .into_iter()
-                        .collect(),
-                ));
-                border.set_if_neq(BorderGradient::default());
-            }
-            PreviewKind::Border => {
-                background.set_if_neq(BackgroundGradient::default());
-                border.set_if_neq(BorderGradient(
-                    state
-                        .show_border
-                        .then(|| current.clone())
-                        .into_iter()
-                        .collect(),
-                ));
-            }
-        }
+    for (kind, background, border) in &mut previews {
+        sync_preview(
+            background.map_unchanged(|background| &mut background.0),
+            &state.mesh,
+            matches!(kind, PreviewKind::Background) && state.show_background,
+        );
+        sync_preview(
+            border.map_unchanged(|border| &mut border.0),
+            &state.mesh,
+            matches!(kind, PreviewKind::Border) && state.show_border,
+        );
     }
 
     for (marker, mut node, mut transform, mut color) in &mut points {
@@ -1078,7 +1075,7 @@ fn sync_editor(
     let selected = state.mesh.points()[state.selected];
     let rgba = selected.color.to_srgba().to_f32_array();
     for mut text in &mut readouts {
-        text.0 = format!(
+        text.set_if_neq(Text(format!(
             "Point {} | pos [{:.3}, {:.3}] | RGBA [{:.2}, {:.2}, {:.2}, {:.2}]\nColor: {:?} / {:?} | Animation: {} | {}",
             state.selected,
             selected.position.x,
@@ -1091,10 +1088,10 @@ fn sync_editor(
             state.mesh.color_space(),
             if state.animate { "playing" } else { "paused" },
             state.status,
-        );
+        )));
     }
     for mut color in &mut swatches {
-        color.0 = selected.color;
+        color.set_if_neq(BackgroundColor(selected.color));
     }
     for (entity, channel, value, children) in &sliders {
         let desired = rgba[channel.0];
@@ -1102,13 +1099,15 @@ fn sync_editor(
             commands.entity(entity).insert(SliderValue(desired));
         }
         for descendant in children.iter() {
-            if let Ok(mut thumb) = slider_visuals.get_mut(descendant) {
-                thumb.left = percent(desired * 100.0);
+            if let Ok(thumb) = slider_visuals.get_mut(descendant) {
+                thumb
+                    .map_unchanged(|node| &mut node.left)
+                    .set_if_neq(percent(desired * 100.0));
             }
         }
     }
     for (channel, mut text) in &mut channel_values {
-        text.0 = format!("{:.2}", rgba[channel.0]);
+        text.set_if_neq(Text(format!("{:.2}", rgba[channel.0])));
     }
 }
 
@@ -1154,6 +1153,157 @@ fn style_buttons(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Resource, Default)]
+    struct EditorSyncChanges {
+        backgrounds: usize,
+        borders: usize,
+        readouts: usize,
+        channels: usize,
+        swatches: usize,
+        thumbs: usize,
+    }
+
+    fn record_editor_sync_changes(
+        backgrounds: Query<Entity, (With<PreviewKind>, Changed<BackgroundGradient>)>,
+        borders: Query<Entity, (With<PreviewKind>, Changed<BorderGradient>)>,
+        readouts: Query<Entity, (With<StateReadout>, Changed<Text>)>,
+        channels: Query<Entity, (With<ChannelValue>, Changed<Text>)>,
+        swatches: Query<Entity, (With<SelectedSwatch>, Changed<BackgroundColor>)>,
+        thumbs: Query<Entity, (With<SliderThumb>, Changed<Node>)>,
+        mut changes: ResMut<EditorSyncChanges>,
+    ) {
+        changes.backgrounds = backgrounds.iter().count();
+        changes.borders = borders.iter().count();
+        changes.readouts = readouts.iter().count();
+        changes.channels = channels.iter().count();
+        changes.swatches = swatches.iter().count();
+        changes.thumbs = thumbs.iter().count();
+    }
+
+    fn create_editor_sync_app() -> App {
+        let mut app = App::new();
+        app.insert_resource(EditorState::new())
+            .init_resource::<EditorSyncChanges>()
+            .add_systems(
+                Update,
+                (rebuild_editor, sync_editor, record_editor_sync_changes).chain(),
+            );
+        app
+    }
+
+    fn assert_previews_synced(world: &mut World) {
+        let mut previews = world.query::<(&PreviewKind, &BackgroundGradient, &BorderGradient)>();
+        let state = world.resource::<EditorState>();
+        assert_eq!(previews.iter(world).count(), 2);
+        let assert_layer = |gradients: &[Gradient], visible| {
+            if visible {
+                assert!(matches!(gradients, [Gradient::Mesh(mesh)] if mesh == &state.mesh));
+            } else {
+                assert!(gradients.is_empty());
+            }
+        };
+        for (kind, background, border) in previews.iter(world) {
+            assert_layer(
+                &background.0,
+                matches!(kind, PreviewKind::Background) && state.show_background,
+            );
+            assert_layer(
+                &border.0,
+                matches!(kind, PreviewKind::Border) && state.show_border,
+            );
+        }
+    }
+
+    #[test]
+    fn previews_follow_checked_edits_and_independent_visibility() {
+        let mut app = create_editor_sync_app();
+        app.update();
+        assert_previews_synced(app.world_mut());
+
+        {
+            let mut state = app.world_mut().resource_mut::<EditorState>();
+            let index = state.selected;
+            let mut point = state.mesh.points()[index];
+            point.position += Vec2::new(0.07, 0.04);
+            point.color = Color::srgba(0.7, 0.4, 0.3, 0.5);
+            state.accept_point(index, point, "point edit");
+            state
+                .mesh
+                .set_color_interpolation(MeshGradientColorInterpolation::Bicubic);
+            state
+                .mesh
+                .try_set_color_space(InterpolationColorSpace::Srgba)
+                .unwrap();
+        }
+        app.update();
+        assert_previews_synced(app.world_mut());
+        let changes = app.world().resource::<EditorSyncChanges>();
+        assert_eq!(changes.backgrounds, 1);
+        assert_eq!(changes.borders, 1);
+        assert_eq!(changes.readouts, 1);
+        assert_eq!(changes.channels, 4);
+        assert_eq!(changes.swatches, 1);
+        assert_eq!(changes.thumbs, 4);
+
+        {
+            let mut state = app.world_mut().resource_mut::<EditorState>();
+            state.show_background = false;
+            state.show_border = false;
+        }
+        app.update();
+        assert_previews_synced(app.world_mut());
+        let changes = app.world().resource::<EditorSyncChanges>();
+        assert_eq!(changes.backgrounds, 1);
+        assert_eq!(changes.borders, 1);
+
+        app.world_mut()
+            .resource_mut::<EditorState>()
+            .mesh
+            .try_set_color(7, Color::WHITE)
+            .unwrap();
+        app.update();
+        assert_previews_synced(app.world_mut());
+        let changes = app.world().resource::<EditorSyncChanges>();
+        assert_eq!(changes.backgrounds, 0);
+        assert_eq!(changes.borders, 0);
+
+        app.world_mut()
+            .resource_mut::<EditorState>()
+            .show_background = true;
+        app.update();
+        assert_previews_synced(app.world_mut());
+        let changes = app.world().resource::<EditorSyncChanges>();
+        assert_eq!(changes.backgrounds, 1);
+        assert_eq!(changes.borders, 0);
+
+        app.world_mut().resource_mut::<EditorState>().show_border = true;
+        app.update();
+        assert_previews_synced(app.world_mut());
+        let changes = app.world().resource::<EditorSyncChanges>();
+        assert_eq!(changes.backgrounds, 0);
+        assert_eq!(changes.borders, 1);
+    }
+
+    #[test]
+    fn status_only_change_updates_readout_without_invalidating_color_ui_or_previews() {
+        let mut app = create_editor_sync_app();
+        app.update();
+        let changes = app.world().resource::<EditorSyncChanges>();
+        assert_eq!(changes.channels, 4);
+        assert_eq!(changes.swatches, 1);
+        assert_eq!(changes.thumbs, 4);
+
+        app.world_mut().resource_mut::<EditorState>().status = "Only the status changed".into();
+        app.update();
+        let changes = app.world().resource::<EditorSyncChanges>();
+        assert_eq!(changes.readouts, 1);
+        assert_eq!(changes.channels, 0);
+        assert_eq!(changes.swatches, 0);
+        assert_eq!(changes.thumbs, 0);
+        assert_eq!(changes.backgrounds, 0);
+        assert_eq!(changes.borders, 0);
+    }
 
     #[derive(Resource, Default)]
     struct LayoutChanges(usize);
