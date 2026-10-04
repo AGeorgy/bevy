@@ -10,7 +10,6 @@
 //! refinement. Vertex color mode adds an exact bilinear color-error term, so it
 //! spends triangles only where the rasterizer would reveal a patch diagonal.
 
-use crate::gradient::convert_color_to_space;
 use bevy_math::{DVec2, Mat2, Vec2};
 use bevy_platform::sync::Arc;
 use bevy_ui::{MeshGradient, MeshGradientColorInterpolation};
@@ -583,7 +582,7 @@ impl SurfaceBounds {
         .then(|| {
             mesh.points()
                 .iter()
-                .map(|point| convert_color_to_space(point.color, mesh.color_space()).map(f64::from))
+                .map(|point| mesh.color_space().to_components(point.color).map(f64::from))
                 .collect()
         });
         let interval_patches: SmallVec<[IntervalPatch<2>; 9]> =
@@ -1061,7 +1060,7 @@ mod tests {
             .points()
             .iter()
             .map(|point| {
-                let color = convert_color_to_space(point.color, mesh.color_space());
+                let color = mesh.color_space().to_components(point.color);
                 [
                     point.position.x as f64,
                     point.position.y as f64,
@@ -1146,7 +1145,7 @@ mod tests {
         mesh.points()
             .iter()
             .map(|point| {
-                let color = convert_color_to_space(point.color, mesh.color_space());
+                let color = mesh.color_space().to_components(point.color);
                 [
                     point.position.x,
                     point.position.y,
@@ -1407,8 +1406,9 @@ mod tests {
         ] {
             let mut grid = create_test_mesh(2, 0.0, 1.0, space);
             for hue in [10.0, 350.0] {
-                let color =
-                    convert_color_to_space(Color::hsva(hue, 0.7, 0.8, 0.5), grid.color_space());
+                let color = grid
+                    .color_space()
+                    .to_components(Color::hsva(hue, 0.7, 0.8, 0.5));
                 for (actual, expected) in color.into_iter().zip([hue / 360.0, 0.7, 0.8, 0.5]) {
                     assert!((actual - expected).abs() < 1e-5);
                 }

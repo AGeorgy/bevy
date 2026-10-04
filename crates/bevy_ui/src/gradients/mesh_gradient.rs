@@ -1,8 +1,6 @@
 use super::InterpolationColorSpace;
 use alloc::vec::Vec;
-use bevy_color::{
-    Alpha, Color, ColorToComponents, Hsla, Hsva, LinearRgba, Okhsla, Oklaba, Oklcha, Srgba,
-};
+use bevy_color::{Alpha, Color, ColorToComponents, Oklaba};
 use bevy_math::Vec2;
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 #[cfg(feature = "serialize")]
@@ -638,14 +636,10 @@ impl MeshGradient {
             if !(0.0..=1.0).contains(&point.color.alpha()) {
                 return Err(MeshGradientError::AlphaOutOfRange { point: index });
             }
-            if LinearRgba::from(point.color)
-                .to_f32_array()
-                .iter()
-                .any(|component| !component.is_finite())
-            {
+            if !point.color.to_linear().to_vec4().is_finite() {
                 return Err(MeshGradientError::NonFiniteColor { point: index });
             }
-            let color = convert_color_to_interpolation_components(point.color, color_space);
+            let color = color_space.to_components(point.color);
             if color.iter().any(|component| !component.is_finite()) {
                 return Err(MeshGradientError::NonFiniteColor { point: index });
             }
@@ -735,53 +729,6 @@ fn read_color_components(color: Color) -> [f32; 4] {
         Color::Okhsla(color) => color.to_f32_array(),
         Color::Okhsva(color) => color.to_f32_array(),
         Color::Okhwba(color) => color.to_f32_array(),
-    }
-}
-
-fn convert_color_to_interpolation_components(
-    color: Color,
-    color_space: InterpolationColorSpace,
-) -> [f32; 4] {
-    match color_space {
-        InterpolationColorSpace::Oklaba => Oklaba::from(color).to_f32_array(),
-        InterpolationColorSpace::Srgba => Srgba::from(color).to_f32_array(),
-        InterpolationColorSpace::LinearRgba => LinearRgba::from(color).to_f32_array(),
-        InterpolationColorSpace::Oklcha | InterpolationColorSpace::OklchaLong => {
-            let color = Oklcha::from(color);
-            [
-                color.lightness,
-                color.chroma,
-                color.hue / 360.0,
-                color.alpha,
-            ]
-        }
-        InterpolationColorSpace::Hsla | InterpolationColorSpace::HslaLong => {
-            let color = Hsla::from(color);
-            [
-                color.hue / 360.0,
-                color.saturation,
-                color.lightness,
-                color.alpha,
-            ]
-        }
-        InterpolationColorSpace::Hsva | InterpolationColorSpace::HsvaLong => {
-            let color = Hsva::from(color);
-            [
-                color.hue / 360.0,
-                color.saturation,
-                color.value,
-                color.alpha,
-            ]
-        }
-        InterpolationColorSpace::Okhsla | InterpolationColorSpace::OkhslaLong => {
-            let color = Okhsla::from(color);
-            [
-                color.hue / 360.0,
-                color.saturation,
-                color.lightness,
-                color.alpha,
-            ]
-        }
     }
 }
 
@@ -1017,6 +964,7 @@ impl<'de> serde::Deserialize<'de> for MeshGradient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy_color::{Hsla, Hsva, LinearRgba, Oklcha, Srgba};
     use bevy_reflect::{PartialReflect, ReflectRef};
     use proptest::{collection, prelude::*};
 
@@ -1135,6 +1083,16 @@ mod tests {
         points[0].color = Color::from(Oklaba::new(1.0e20, 0.0, 0.0, 1.0));
         assert!(matches!(
             MeshGradient::new_in_color_space(2, 2, points, InterpolationColorSpace::Oklaba),
+            Err(MeshGradientError::NonFiniteColor { point: 0 })
+        ));
+
+        // OKHSL's black endpoint converts to finite RGB without examining hue.
+        // Validation must still reject a non-finite component in the input.
+        let mut points = create_regular_grid(2, 2);
+        points[0].color = Color::okhsla(f32::NAN, 1.0, 0.0, 1.0);
+        assert!(points[0].color.to_linear().to_vec4().is_finite());
+        assert!(matches!(
+            MeshGradient::new(2, 2, points),
             Err(MeshGradientError::NonFiniteColor { point: 0 })
         ));
     }
@@ -1695,10 +1653,7 @@ mod tests {
         let values: Vec<_> = points
             .iter()
             .map(|point| {
-                let color = convert_color_to_interpolation_components(
-                    point.color,
-                    InterpolationColorSpace::LinearRgba,
-                );
+                let color = InterpolationColorSpace::LinearRgba.to_components(point.color);
                 [
                     point.position.x as f64,
                     point.position.y as f64,
@@ -1797,10 +1752,7 @@ mod tests {
         let points = create_regular_grid(width, height);
         let mut values = Vec::new();
         for point in points {
-            let color = convert_color_to_interpolation_components(
-                point.color,
-                InterpolationColorSpace::LinearRgba,
-            );
+            let color = InterpolationColorSpace::LinearRgba.to_components(point.color);
             values.push([
                 point.position.x as f64,
                 point.position.y as f64,
@@ -1923,12 +1875,10 @@ mod tests {
                     assert_eq!(ron::from_str::<MeshGradient>(&encoded).unwrap(), mesh);
                 }
             }
-            assert!(convert_color_to_interpolation_components(
-                Color::hsva(350.0, 0.7, 0.8, 0.5),
-                space
-            )
-            .iter()
-            .all(|component| component.is_finite()));
+            assert!(space
+                .to_components(Color::hsva(350.0, 0.7, 0.8, 0.5))
+                .iter()
+                .all(|component| component.is_finite()));
         }
     }
 

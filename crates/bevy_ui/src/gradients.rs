@@ -1,5 +1,5 @@
 use crate::{UiPosition, Val, ValNum};
-use bevy_color::{Color, Srgba};
+use bevy_color::{Color, ColorToComponents, Hsla, Hsva, LinearRgba, Okhsla, Oklaba, Oklcha, Srgba};
 use bevy_ecs::{component::Component, reflect::ReflectComponent};
 use bevy_math::Vec2;
 use bevy_reflect::prelude::*;
@@ -713,6 +713,43 @@ impl InterpolationColorSpace {
     pub const fn is_hue_based(self) -> bool {
         !matches!(self, Self::Oklaba | Self::Srgba | Self::LinearRgba)
     }
+
+    /// Converts a color to this interpolation space's four components.
+    ///
+    /// Components follow the corresponding color type's order, with alpha in
+    /// the last component. Hue is expressed in turns rather than degrees: it
+    /// is the third component for OKLCH and the first for HSL, HSV, and OKHSL.
+    /// Short and long hue paths produce the same components; the path is chosen
+    /// during interpolation. No validation or additional wrapping or clamping
+    /// is applied after the color-space conversion.
+    pub fn to_components(self, color: impl Into<Color>) -> [f32; 4] {
+        let color = color.into();
+        match self {
+            Self::Oklaba => Oklaba::from(color).to_f32_array(),
+            Self::Srgba => Srgba::from(color).to_f32_array(),
+            Self::LinearRgba => LinearRgba::from(color).to_f32_array(),
+            Self::Oklcha | Self::OklchaLong => {
+                let mut components = Oklcha::from(color).to_f32_array();
+                components[2] /= 360.0;
+                components
+            }
+            Self::Hsla | Self::HslaLong => {
+                let mut components = Hsla::from(color).to_f32_array();
+                components[0] /= 360.0;
+                components
+            }
+            Self::Hsva | Self::HsvaLong => {
+                let mut components = Hsva::from(color).to_f32_array();
+                components[0] /= 360.0;
+                components
+            }
+            Self::Okhsla | Self::OkhslaLong => {
+                let mut components = Okhsla::from(color).to_f32_array();
+                components[0] /= 360.0;
+                components
+            }
+        }
+    }
 }
 
 /// Set the color space used for interpolation.
@@ -777,5 +814,86 @@ impl InColorSpace for ConicGradient {
     fn in_color_space(mut self, color_space: InterpolationColorSpace) -> Self {
         self.color_space = color_space;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interpolation_components_preserve_channel_order_alpha_and_hue_units() {
+        for (space, color, expected) in [
+            (
+                InterpolationColorSpace::Oklaba,
+                Color::oklaba(0.625, -0.125, 0.25, 0.375),
+                [0.625, -0.125, 0.25, 0.375],
+            ),
+            (
+                InterpolationColorSpace::Oklcha,
+                Color::oklcha(0.625, 0.125, 450.0, 0.375),
+                [0.625, 0.125, 1.25, 0.375],
+            ),
+            (
+                InterpolationColorSpace::OklchaLong,
+                Color::oklcha(0.625, 0.125, 450.0, 0.375),
+                [0.625, 0.125, 1.25, 0.375],
+            ),
+            (
+                InterpolationColorSpace::Srgba,
+                Color::srgba(1.5, -0.125, 0.25, 0.375),
+                [1.5, -0.125, 0.25, 0.375],
+            ),
+            (
+                InterpolationColorSpace::LinearRgba,
+                Color::linear_rgba(1.5, -0.125, 0.25, 0.375),
+                [1.5, -0.125, 0.25, 0.375],
+            ),
+            (
+                InterpolationColorSpace::Hsla,
+                Color::hsla(-90.0, 0.625, 0.375, 0.25),
+                [-0.25, 0.625, 0.375, 0.25],
+            ),
+            (
+                InterpolationColorSpace::HslaLong,
+                Color::hsla(-90.0, 0.625, 0.375, 0.25),
+                [-0.25, 0.625, 0.375, 0.25],
+            ),
+            (
+                InterpolationColorSpace::Hsva,
+                Color::hsva(450.0, 0.75, 1.5, 0.625),
+                [1.25, 0.75, 1.5, 0.625],
+            ),
+            (
+                InterpolationColorSpace::HsvaLong,
+                Color::hsva(450.0, 0.75, 1.5, 0.625),
+                [1.25, 0.75, 1.5, 0.625],
+            ),
+            (
+                InterpolationColorSpace::Okhsla,
+                Color::okhsla(-90.0, 1.25, 0.625, 0.375),
+                [-0.25, 1.25, 0.625, 0.375],
+            ),
+            (
+                InterpolationColorSpace::OkhslaLong,
+                Color::okhsla(-90.0, 1.25, 0.625, 0.375),
+                [-0.25, 1.25, 0.625, 0.375],
+            ),
+        ] {
+            assert_eq!(space.to_components(color), expected, "{space:?}");
+        }
+
+        let green = Color::hsva(120.0, 1.0, 1.0, 0.375);
+        for space in [
+            InterpolationColorSpace::Srgba,
+            InterpolationColorSpace::LinearRgba,
+        ] {
+            assert_eq!(space.to_components(green), [0.0, 1.0, 0.0, 0.375]);
+        }
+        assert_eq!(
+            InterpolationColorSpace::LinearRgba
+                .to_components(LinearRgba::new(1.5, -0.125, 0.25, 0.375)),
+            [1.5, -0.125, 0.25, 0.375],
+        );
     }
 }

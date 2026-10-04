@@ -161,9 +161,6 @@ struct ChannelSlider(usize);
 #[derive(Component)]
 struct ChannelValue(usize);
 
-#[derive(Component)]
-struct SliderVisual;
-
 #[derive(Component, Clone, Copy)]
 enum EditorAction {
     Grid(usize, usize),
@@ -746,7 +743,6 @@ fn create_channel_slider(index: usize, value: f32) -> impl Bundle {
                         BackgroundColor(Color::srgb(0.18, 0.21, 0.27)),
                     ),
                     (
-                        SliderVisual,
                         SliderThumb,
                         Node {
                             position_type: PositionType::Absolute,
@@ -861,7 +857,7 @@ fn edit_channel(
     let selected = state.selected;
     let mut rgba = point.color.to_srgba().to_f32_array();
     rgba[channel.0] = event.value.clamp(0.0, 1.0);
-    point.color = Color::srgba(rgba[0], rgba[1], rgba[2], rgba[3]);
+    point.color = Srgba::from_f32_array(rgba).into();
     state.accept_point(
         selected,
         point,
@@ -990,7 +986,7 @@ fn sync_editor(
     canvas: Query<Ref<ComputedNode>, With<EditorCanvas>>,
     mut edges: Query<
         (&ControlEdge, &mut Node, &mut UiTransform),
-        (Without<ControlPoint>, Without<SliderVisual>),
+        (Without<ControlPoint>, Without<SliderThumb>),
     >,
     mut readouts: Query<&mut Text, With<StateReadout>>,
     mut swatches: Query<&mut BackgroundColor, (With<SelectedSwatch>, Without<ControlPoint>)>,
@@ -998,7 +994,7 @@ fn sync_editor(
     mut slider_visuals: Query<
         &mut Node,
         (
-            With<SliderVisual>,
+            With<SliderThumb>,
             Without<ControlPoint>,
             Without<ControlEdge>,
         ),

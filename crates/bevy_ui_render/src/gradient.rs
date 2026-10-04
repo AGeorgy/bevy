@@ -12,7 +12,7 @@ use crate::mesh_gradient::{
 };
 use crate::*;
 use bevy_asset::*;
-use bevy_color::{Color, ColorToComponents, Hsla, Hsva, LinearRgba, Okhsla, Oklaba, Oklcha, Srgba};
+use bevy_color::{LinearRgba, Oklaba};
 use bevy_ecs::{
     prelude::Component,
     system::{
@@ -956,53 +956,6 @@ struct UiGradientVertex {
     hint: f32,
 }
 
-pub(crate) fn convert_color_to_space(
-    color: impl Into<Color>,
-    space: InterpolationColorSpace,
-) -> [f32; 4] {
-    let color = color.into();
-    match space {
-        InterpolationColorSpace::Oklaba => {
-            let oklaba: Oklaba = color.into();
-            [oklaba.lightness, oklaba.a, oklaba.b, oklaba.alpha]
-        }
-        InterpolationColorSpace::Oklcha | InterpolationColorSpace::OklchaLong => {
-            let oklcha: Oklcha = color.into();
-            [
-                oklcha.lightness,
-                oklcha.chroma,
-                // The shader expects normalized hues
-                oklcha.hue / 360.,
-                oklcha.alpha,
-            ]
-        }
-        InterpolationColorSpace::Okhsla | InterpolationColorSpace::OkhslaLong => {
-            let okhsla: Okhsla = color.into();
-            [
-                okhsla.hue / 360.,
-                okhsla.saturation,
-                okhsla.lightness,
-                okhsla.alpha,
-            ]
-        }
-        InterpolationColorSpace::Srgba => {
-            let srgba: Srgba = color.into();
-            [srgba.red, srgba.green, srgba.blue, srgba.alpha]
-        }
-        InterpolationColorSpace::LinearRgba => color.to_linear().to_f32_array(),
-        InterpolationColorSpace::Hsla | InterpolationColorSpace::HslaLong => {
-            let hsla: Hsla = color.into();
-            // The shader expects normalized hues
-            [hsla.hue / 360., hsla.saturation, hsla.lightness, hsla.alpha]
-        }
-        InterpolationColorSpace::Hsva | InterpolationColorSpace::HsvaLong => {
-            let hsva: Hsva = color.into();
-            // The shader expects normalized hues
-            [hsva.hue / 360., hsva.saturation, hsva.value, hsva.alpha]
-        }
-    }
-}
-
 pub fn prepare_gradient(
     mut commands: Commands,
     render_device: Res<RenderDevice>,
@@ -1112,9 +1065,8 @@ pub fn prepare_gradient(
                                 continue;
                             }
                         }
-                        let start_color =
-                            convert_color_to_space(start_stop.0, gradient.color_space);
-                        let end_color = convert_color_to_space(end_stop.0, gradient.color_space);
+                        let start_color = gradient.color_space.to_components(start_stop.0);
+                        let end_color = gradient.color_space.to_components(end_stop.0);
                         let mut stop_flags = flags;
                         if 0. < start_stop.1 && (stop_index == 0 || segment_count == 0) {
                             stop_flags |= shader_flags::FILL_START;
@@ -1221,7 +1173,7 @@ struct GpuParameterTopology {
 
 #[derive(Component)]
 pub(crate) struct MeshGradientGpu {
-    bind_group: Arc<BindGroup>,
+    bind_group: BindGroup,
     topology: Arc<GpuParameterTopology>,
     topology_key: TopologyKey,
 }
@@ -1235,7 +1187,7 @@ struct CachedMeshGradientBindings {
     points: UniformBuffer<MeshGradientPointsUniform>,
     style: UniformBuffer<MeshGradientStyleUniform>,
     clip: Option<UniformBuffer<MeshGradientClipUniform>>,
-    bind_group: Arc<BindGroup>,
+    bind_group: BindGroup,
 }
 
 #[derive(Resource, Default)]
@@ -1258,7 +1210,7 @@ impl MeshGradientBindingCache {
         pipeline_cache: &PipelineCache,
         render_device: &RenderDevice,
         render_queue: &RenderQueue,
-    ) -> Arc<BindGroup> {
+    ) -> BindGroup {
         if let Some(entry) = self.entries.get_mut(&id)
             && entry.clip.is_some() == clip_value.is_some()
         {
@@ -1291,7 +1243,7 @@ impl MeshGradientBindingCache {
             uniform.write_buffer(render_device, render_queue);
             uniform
         });
-        let bind_group = Arc::new(match clip.as_ref() {
+        let bind_group = match clip.as_ref() {
             Some(clip) => render_device.create_bind_group(
                 "ui_mesh_gradient_clipped_bind_group",
                 &pipeline_cache.get_bind_group_layout(layout),
@@ -1309,7 +1261,7 @@ impl MeshGradientBindingCache {
                     style.binding().unwrap(),
                 )),
             ),
-        });
+        };
         self.entries.insert(
             id,
             CachedMeshGradientBindings {
@@ -1400,12 +1352,6 @@ enum MeshUniformError {
     Invalid,
 }
 
-fn is_affine_transform_finite(transform: Affine2) -> bool {
-    transform.matrix2.x_axis.is_finite()
-        && transform.matrix2.y_axis.is_finite()
-        && transform.translation.is_finite()
-}
-
 fn gradient_has_clip_rects(gradient: &ExtractedGradient) -> bool {
     gradient
         .clip
@@ -1423,7 +1369,7 @@ fn build_mesh_gradient_points_uniform(mesh: &MeshGradient) -> MeshGradientPoints
     );
     for (index, point) in mesh.points().iter().enumerate() {
         positions[index] = point.position.extend(0.0).extend(0.0);
-        colors[index] = Vec4::from_array(convert_color_to_space(point.color, mesh.color_space()));
+        colors[index] = Vec4::from_array(mesh.color_space().to_components(point.color));
         if uses_okhsl {
             let lab = Oklaba::from(point.color);
             positions[index].z = lab.lightness;
@@ -1516,11 +1462,7 @@ fn build_mesh_gradient_style_uniform(
     mesh: &MeshGradient,
 ) -> Result<(MeshGradientStyleUniform, Option<MeshGradientClipUniform>), MeshUniformError> {
     let size = gradient.rect.size();
-    if !size.is_finite()
-        || size.x <= 0.0
-        || size.y <= 0.0
-        || !is_affine_transform_finite(gradient.transform)
-    {
+    if !size.is_finite() || size.x <= 0.0 || size.y <= 0.0 || !gradient.transform.is_finite() {
         return Err(MeshUniformError::Invalid);
     }
 
@@ -1534,7 +1476,7 @@ fn build_mesh_gradient_style_uniform(
     if clip_rects.iter().any(|clip| {
         !clip.rect.min.is_finite()
             || !clip.rect.max.is_finite()
-            || !is_affine_transform_finite(clip.world_to_clip_local)
+            || !clip.world_to_clip_local.is_finite()
     }) {
         return Err(MeshUniformError::Invalid);
     }
@@ -1845,7 +1787,7 @@ impl<P: PhaseItem> RenderCommand<P> for DrawMeshGradient {
 mod tests {
     use super::*;
     use bevy_asset::{uuid::Uuid, AssetId};
-    use bevy_color::Color;
+    use bevy_color::{Color, ColorToComponents, Hsla, Hsva, Okhsla, Oklcha};
     use bevy_math::Vec4Swizzles;
     use bevy_shader::{ShaderCache, ShaderCacheSource};
     use bevy_ui::{CalculatedClipRect, MeshGradientPoint};
