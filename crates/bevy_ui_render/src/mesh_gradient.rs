@@ -320,8 +320,8 @@ impl ErrorBound {
     }
 }
 
-pub(crate) struct QualitySelection {
-    pub key: TopologyKey,
+pub(crate) struct QualitySelection<'a> {
+    pub key: &'a TopologyKey,
     pub error: ErrorBound,
     /// Emit a diagnostic on entry to the capped state, not on every frame.
     pub report_cap: bool,
@@ -344,7 +344,7 @@ impl QualityState {
         &mut self,
         bounds: &Arc<SurfaceBounds>,
         screen_axes: [DVec2; 2],
-    ) -> QualitySelection {
+    ) -> QualitySelection<'_> {
         self.report_cooldown = self.report_cooldown.saturating_sub(1);
         let unchanged = self
             .cached_input
@@ -356,10 +356,10 @@ impl QualityState {
             self.cached_error = None;
         }
         let bounds = &self.screen_bounds;
-        let (chosen, error);
+        let error;
         if let Some(previous) = self
             .key
-            .as_ref()
+            .as_mut()
             .filter(|key| key.width == bounds.width && key.height == bounds.height)
         {
             let previous_error = self
@@ -368,15 +368,16 @@ impl QualityState {
             if !previous_error.meets_tolerance(1.0) {
                 // An unchanged capped selection has already exhausted its
                 // permitted refinements. Its diagnostic still advances below.
-                chosen = if unchanged {
-                    previous.clone()
-                } else {
-                    bounds.refine(previous.clone(), 1.0, None)
-                };
-                error = if chosen == *previous {
+                error = if unchanged {
                     previous_error
                 } else {
-                    bounds.estimate_error_bound(&chosen)
+                    let chosen = bounds.refine(previous.clone(), 1.0, None);
+                    if chosen == *previous {
+                        previous_error
+                    } else {
+                        *previous = chosen;
+                        bounds.estimate_error_bound(previous)
+                    }
                 };
                 self.below_half = 0;
                 self.cached_demotion = None;
@@ -402,20 +403,22 @@ impl QualityState {
                     self.below_half = 0;
                 }
                 if self.below_half < DEMOTION_FRAMES {
-                    chosen = previous.clone();
                     error = previous_error;
+                    self.cached_demotion = Some((candidate, candidate_error));
                 } else {
-                    chosen = candidate.clone();
+                    *previous = candidate;
                     error = candidate_error;
                     self.below_half = 0;
+                    self.cached_demotion = None;
                 }
-                self.cached_demotion = Some((candidate, candidate_error));
             }
         } else {
             let minimum = TopologyKey::new_uniform(bounds.width, bounds.height, MIN_SUBDIVISIONS);
-            chosen = bounds.refine(minimum, 1.0, None);
+            let chosen = bounds.refine(minimum, 1.0, None);
             error = bounds.estimate_error_bound(&chosen);
+            self.key = Some(chosen);
             self.below_half = 0;
+            self.cached_demotion = None;
         }
         let capped = !error.meets_tolerance(1.0);
         let report_cap = capped && !self.capped && self.report_cooldown == 0;
@@ -423,13 +426,12 @@ impl QualityState {
             self.report_cooldown = 120;
         }
         self.capped = capped;
-        if self.key.as_ref() != Some(&chosen) {
-            self.cached_demotion = None;
-        }
-        self.key = Some(chosen.clone());
         self.cached_error = Some(error);
         QualitySelection {
-            key: chosen,
+            key: self
+                .key
+                .as_ref()
+                .expect("quality update initializes the topology key"),
             error,
             report_cap,
         }
@@ -1326,10 +1328,10 @@ mod tests {
             InterpolationColorSpace::LinearRgba,
         ));
         let mut state = QualityState::default();
-        let small = state.update(&curved, create_screen_axes(256.0));
+        let small = state.update(&curved, create_screen_axes(256.0)).key.clone();
         let large = state.update(&curved, create_screen_axes(4096.0));
-        assert!(small.key.find_maximum_subdivisions() > 1);
-        assert!(large.key.count_triangles() > small.key.count_triangles());
+        assert!(small.find_maximum_subdivisions() > 1);
+        assert!(large.key.count_triangles() > small.count_triangles());
         assert!(large.error.meets_tolerance(1.0));
     }
 
@@ -1345,12 +1347,14 @@ mod tests {
                 space,
                 MeshGradientColorInterpolation::Vertex,
             ));
-            let chosen = QualityState::default().update(&vivid, create_screen_axes(512.0));
+            let mut chosen_state = QualityState::default();
+            let chosen = chosen_state.update(&vivid, create_screen_axes(512.0));
             assert_eq!(chosen.key.u_subdivisions(0, 0), 4);
             assert_eq!(chosen.key.v_subdivisions(0, 0), 4);
             assert!(chosen.error.color <= COLOR_LIMIT.next_up());
 
-            let subpixel = QualityState::default().update(&vivid, create_screen_axes(1.0));
+            let mut subpixel_state = QualityState::default();
+            let subpixel = subpixel_state.update(&vivid, create_screen_axes(1.0));
             assert_eq!(subpixel.key.find_maximum_subdivisions(), MIN_SUBDIVISIONS);
 
             let quiet = create_surface_bounds(&create_checkerboard_mesh(
@@ -1397,11 +1401,13 @@ mod tests {
                 }
             }
             let before = create_surface_bounds(&grid);
-            let before = QualityState::default().update(&before, create_screen_axes(4096.0));
+            let mut before_state = QualityState::default();
+            let before = before_state.update(&before, create_screen_axes(4096.0));
             grid.try_set_color(0, Color::hsva(350.0, 1.0, 1.0, 1.0))
                 .unwrap();
             let after = create_surface_bounds(&grid);
-            let after = QualityState::default().update(&after, create_screen_axes(4096.0));
+            let mut after_state = QualityState::default();
+            let after = after_state.update(&after, create_screen_axes(4096.0));
             assert_eq!(before.key, after.key);
             assert_eq!(after.key.find_maximum_subdivisions(), MIN_SUBDIVISIONS);
             assert_eq!(after.error.color, 0.0);
@@ -1420,8 +1426,10 @@ mod tests {
         vivid_mesh.set_color_interpolation(MeshGradientColorInterpolation::Bicubic);
         let quiet = create_surface_bounds(&quiet_mesh);
         let vivid = create_surface_bounds(&vivid_mesh);
-        let a = QualityState::default().update(&quiet, create_screen_axes(1.0));
-        let b = QualityState::default().update(&vivid, create_screen_axes(1.0));
+        let mut a_state = QualityState::default();
+        let a = a_state.update(&quiet, create_screen_axes(1.0));
+        let mut b_state = QualityState::default();
+        let b = b_state.update(&vivid, create_screen_axes(1.0));
         assert_eq!(b.key, a.key);
         let topology = TopologyKey::new_uniform(3, 3, 8);
         let rotated = [DVec2::Y * 512.0, -DVec2::X * 512.0];
@@ -1465,13 +1473,16 @@ mod tests {
             InterpolationColorSpace::LinearRgba,
         ));
         let mut state = QualityState::default();
-        let high = state.update(&curved, create_screen_axes(4096.0)).key;
+        let high = state
+            .update(&curved, create_screen_axes(4096.0))
+            .key
+            .clone();
         for _ in 0..7 {
-            assert_eq!(state.update(&flat, create_screen_axes(256.0)).key, high);
+            assert_eq!(state.update(&flat, create_screen_axes(256.0)).key, &high);
         }
         state.update(&curved, create_screen_axes(4096.0));
         for _ in 0..7 {
-            assert_eq!(state.update(&flat, create_screen_axes(256.0)).key, high);
+            assert_eq!(state.update(&flat, create_screen_axes(256.0)).key, &high);
         }
         assert_eq!(
             state
@@ -1492,7 +1503,10 @@ mod tests {
         ));
         let flat = create_test_mesh(3, 0.0, 0.0, InterpolationColorSpace::LinearRgba);
         let mut state = QualityState::default();
-        let high = state.update(&curved, create_screen_axes(4096.0)).key;
+        let high = state
+            .update(&curved, create_screen_axes(4096.0))
+            .key
+            .clone();
         let minimum = TopologyKey::new_uniform(3, 3, MIN_SUBDIVISIONS);
         assert!(high.count_triangles() > minimum.count_triangles());
 
@@ -1501,7 +1515,7 @@ mod tests {
         for frame in 1..DEMOTION_FRAMES {
             let bounds = create_surface_bounds(&flat);
             let axes = create_screen_axes(256.0 + f64::from(frame));
-            assert_eq!(state.update(&bounds, axes).key, high);
+            assert_eq!(state.update(&bounds, axes).key, &high);
             assert_eq!(state.below_half, frame);
         }
         assert_eq!(
@@ -1511,7 +1525,7 @@ mod tests {
                     create_screen_axes(256.0 + f64::from(DEMOTION_FRAMES)),
                 )
                 .key,
-            minimum
+            &minimum
         );
         assert_eq!(state.below_half, 0);
     }
@@ -1524,7 +1538,7 @@ mod tests {
             frames: usize,
             cached: &mut QualityState,
             rebuilt: &mut QualityState,
-        ) -> QualitySelection {
+        ) -> (TopologyKey, ErrorBound, bool) {
             let bounds = create_surface_bounds(mesh);
             let mut last = None;
             for frame in 0..frames {
@@ -1539,7 +1553,7 @@ mod tests {
                 );
                 assert_eq!(actual.error.color.to_bits(), expected.error.color.to_bits());
                 assert_eq!(actual.report_cap, expected.report_cap, "frame {frame}");
-                last = Some(actual);
+                last = Some((actual.key.clone(), actual.error, actual.report_cap));
             }
             last.unwrap()
         }
@@ -1592,26 +1606,28 @@ mod tests {
             &mut cached,
             &mut rebuilt,
         );
-        let demoted = compare_frames(
+        let (demoted, _, _) = compare_frames(
             &curved,
             create_screen_axes(1.0),
             8,
             &mut cached,
             &mut rebuilt,
         );
-        assert_eq!(demoted.key.find_maximum_subdivisions(), MIN_SUBDIVISIONS);
+        assert_eq!(demoted.find_maximum_subdivisions(), MIN_SUBDIVISIONS);
 
         let cap = create_test_mesh(16, 0.005, 1.0, InterpolationColorSpace::LinearRgba);
-        let capped = compare_frames(&cap, create_screen_axes(1e10), 1, &mut cached, &mut rebuilt);
-        assert!(capped.report_cap);
-        assert!(!capped.error.meets_tolerance(1.0));
-        let stable_cap =
+        let (_, capped_error, report_cap) =
+            compare_frames(&cap, create_screen_axes(1e10), 1, &mut cached, &mut rebuilt);
+        assert!(report_cap);
+        assert!(!capped_error.meets_tolerance(1.0));
+        let (_, _, report_cap) =
             compare_frames(&cap, create_screen_axes(1e10), 3, &mut cached, &mut rebuilt);
-        assert!(!stable_cap.report_cap);
+        assert!(!report_cap);
         let flat = create_test_mesh(2, 0.0, 0.0, InterpolationColorSpace::LinearRgba);
         compare_frames(&flat, create_screen_axes(1.0), 1, &mut cached, &mut rebuilt);
-        let early = compare_frames(&cap, create_screen_axes(1e10), 1, &mut cached, &mut rebuilt);
-        assert!(!early.report_cap);
+        let (_, _, report_cap) =
+            compare_frames(&cap, create_screen_axes(1e10), 1, &mut cached, &mut rebuilt);
+        assert!(!report_cap);
         compare_frames(
             &flat,
             create_screen_axes(1.0),
@@ -1619,8 +1635,9 @@ mod tests {
             &mut cached,
             &mut rebuilt,
         );
-        let later = compare_frames(&cap, create_screen_axes(1e10), 1, &mut cached, &mut rebuilt);
-        assert!(later.report_cap);
+        let (_, _, report_cap) =
+            compare_frames(&cap, create_screen_axes(1e10), 1, &mut cached, &mut rebuilt);
+        assert!(report_cap);
     }
 
     #[test]
@@ -1668,8 +1685,8 @@ mod tests {
     #[test]
     fn alpha_alone_does_not_promote_geometry_quality() {
         let mut grid = create_test_mesh(3, 0.02, 0.0, InterpolationColorSpace::LinearRgba);
-        let quiet =
-            QualityState::default().update(&create_surface_bounds(&grid), create_screen_axes(1.0));
+        let mut quiet_state = QualityState::default();
+        let quiet = quiet_state.update(&create_surface_bounds(&grid), create_screen_axes(1.0));
         grid.try_edit_points(|points| {
             for point in points {
                 point.color = Color::linear_rgba(0.0, 0.0, 0.0, point.position.x);
@@ -1677,8 +1694,8 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        let alpha =
-            QualityState::default().update(&create_surface_bounds(&grid), create_screen_axes(1.0));
+        let mut alpha_state = QualityState::default();
+        let alpha = alpha_state.update(&create_surface_bounds(&grid), create_screen_axes(1.0));
         assert_eq!(alpha.key, quiet.key);
     }
 
@@ -1712,10 +1729,12 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        let hdr_key = QualityState::default()
+        let mut hdr_key_state = QualityState::default();
+        let hdr_key = hdr_key_state
             .update(&create_surface_bounds(&hdr), create_screen_axes(4096.0))
             .key;
-        let ordinary_key = QualityState::default()
+        let mut ordinary_key_state = QualityState::default();
+        let ordinary_key = ordinary_key_state
             .update(
                 &create_surface_bounds(&create_test_mesh(
                     3,
@@ -1733,10 +1752,13 @@ mod tests {
     fn point_edits_reuse_selected_topology_and_grid_changes_reset_state() {
         let mut grid = create_test_mesh(3, 0.02, 1.0, InterpolationColorSpace::LinearRgba);
         let mut state = QualityState::default();
-        let first = state.update(&create_surface_bounds(&grid), create_screen_axes(512.0));
+        let first = state
+            .update(&create_surface_bounds(&grid), create_screen_axes(512.0))
+            .key
+            .clone();
         grid.try_set_position(4, Vec2::new(0.52001, 0.5)).unwrap();
         let next = state.update(&create_surface_bounds(&grid), create_screen_axes(512.0));
-        assert_eq!(first.key, next.key);
+        assert_eq!(&first, next.key);
         let replacement = create_test_mesh(16, 0.0, 1.0, InterpolationColorSpace::LinearRgba);
         let changed = state.update(
             &create_surface_bounds(&replacement),
@@ -1792,7 +1814,8 @@ mod tests {
                 },
             ]),
         });
-        let selection = QualityState::default().update(&bounds, create_screen_axes(1024.0));
+        let mut selection_state = QualityState::default();
+        let selection = selection_state.update(&bounds, create_screen_axes(1024.0));
 
         assert_eq!(selection.key.u_subdivisions(0, 0), 8);
         assert_eq!(selection.key.u_subdivisions(1, 0), MIN_SUBDIVISIONS);
@@ -1876,7 +1899,8 @@ mod tests {
             MeshGradientGeometry::AllowFolds,
         )
         .unwrap();
-        let selection = QualityState::default().update(
+        let mut selection_state = QualityState::default();
+        let selection = selection_state.update(
             &create_surface_bounds(&mesh),
             [DVec2::X * 1_125.0, DVec2::Y * 866.0],
         );
@@ -2061,12 +2085,13 @@ mod tests {
             let physical_size = logical_size * display_scale;
             let axes = compute_physical_axes(physical_size, Mat2::IDENTITY);
             assert_eq!(axes, create_screen_axes(256.0));
-            let selected = QualityState::default().update(&bounds, axes);
+            let mut selected_state = QualityState::default();
+            let selected = selected_state.update(&bounds, axes);
             if let Some(key) = &expected_key {
-                assert_eq!(&selected.key, key);
+                assert_eq!(selected.key, key);
             }
             expected_key = Some(selected.key.clone());
-            let measured = measure_dense_geometry_error(&mesh, &selected.key, axes, &offsets);
+            let measured = measure_dense_geometry_error(&mesh, selected.key, axes, &offsets);
             assert!(measured <= selected.error.geometry + 1e-9);
             assert!(measured <= GEOMETRY_LIMIT);
         }
@@ -2095,7 +2120,8 @@ mod tests {
                         DVec2::new(-screen * 0.2, screen * 0.8),
                     ],
                 ] {
-                    let chosen = QualityState::default().update(&bounds, screen_axes);
+                    let mut chosen_state = QualityState::default();
+                    let chosen = chosen_state.update(&bounds, screen_axes);
                     assert!(
                         chosen.error.meets_tolerance(1.0),
                         "size={size}, screen={screen}, error={:?}",
@@ -2103,7 +2129,7 @@ mod tests {
                     );
                     let measured = measure_dense_geometry_error(
                         &grid,
-                        &chosen.key,
+                        chosen.key,
                         screen_axes,
                         &[
                             DVec2::new(0.2, 0.7),

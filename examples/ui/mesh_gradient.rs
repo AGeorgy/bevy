@@ -1023,22 +1023,35 @@ fn sync_editor(
         );
     }
 
-    for (marker, mut node, mut transform, mut color) in &mut points {
+    for (marker, mut node, transform, mut color) in &mut points {
         let point = &state.mesh.points()[marker.0];
         let selected = marker.0 == state.selected;
         let diameter = if selected { 22.0 } else { 17.0 };
-        node.left = percent(point.position.x * 100.0);
-        node.top = percent(point.position.y * 100.0);
-        node.width = px(diameter);
-        node.height = px(diameter);
-        node.border = UiRect::all(px(if selected { 4.0 } else { 2.0 }));
-        node.display = if state.show_debug_ui {
-            Display::Flex
-        } else {
-            Display::None
-        };
-        transform.translation = Val2::px(-diameter / 2.0, -diameter / 2.0);
-        color.0 = point.color;
+        node.reborrow()
+            .map_unchanged(|node| &mut node.left)
+            .set_if_neq(percent(point.position.x * 100.0));
+        node.reborrow()
+            .map_unchanged(|node| &mut node.top)
+            .set_if_neq(percent(point.position.y * 100.0));
+        node.reborrow()
+            .map_unchanged(|node| &mut node.width)
+            .set_if_neq(px(diameter));
+        node.reborrow()
+            .map_unchanged(|node| &mut node.height)
+            .set_if_neq(px(diameter));
+        node.reborrow()
+            .map_unchanged(|node| &mut node.border)
+            .set_if_neq(UiRect::all(px(if selected { 4.0 } else { 2.0 })));
+        node.map_unchanged(|node| &mut node.display)
+            .set_if_neq(if state.show_debug_ui {
+                Display::Flex
+            } else {
+                Display::None
+            });
+        transform
+            .map_unchanged(|transform| &mut transform.translation)
+            .set_if_neq(Val2::px(-diameter / 2.0, -diameter / 2.0));
+        color.set_if_neq(BackgroundColor(point.color));
     }
 
     let edge_display = if state.show_debug_ui {
@@ -1050,10 +1063,10 @@ fn sync_editor(
         let border = canvas.border();
         (canvas.size() - border.min_inset - border.max_inset) * canvas.inverse_scale_factor()
     });
-    for (edge, mut node, mut transform) in &mut edges {
-        if node.display != edge_display {
-            node.display = edge_display;
-        }
+    for (edge, mut node, transform) in &mut edges {
+        node.reborrow()
+            .map_unchanged(|node| &mut node.display)
+            .set_if_neq(edge_display);
         let Some(size) = edge_size else {
             continue;
         };
@@ -1066,10 +1079,17 @@ fn sync_editor(
         let delta = end - start;
         let length = delta.length();
         let midpoint = (start + end) * 0.5;
-        node.left = px(midpoint.x - length * 0.5);
-        node.top = px(midpoint.y - 0.75);
-        node.width = px(length);
-        transform.rotation = Rot2::radians(ops::atan2(delta.y, delta.x));
+        node.reborrow()
+            .map_unchanged(|node| &mut node.left)
+            .set_if_neq(px(midpoint.x - length * 0.5));
+        node.reborrow()
+            .map_unchanged(|node| &mut node.top)
+            .set_if_neq(px(midpoint.y - 0.75));
+        node.map_unchanged(|node| &mut node.width)
+            .set_if_neq(px(length));
+        transform
+            .map_unchanged(|transform| &mut transform.rotation)
+            .set_if_neq(Rot2::radians(ops::atan2(delta.y, delta.x)));
     }
 
     let selected = state.mesh.points()[state.selected];
@@ -1162,6 +1182,9 @@ mod tests {
         channels: usize,
         swatches: usize,
         thumbs: usize,
+        debug_nodes: usize,
+        debug_transforms: usize,
+        debug_colors: usize,
     }
 
     fn record_editor_sync_changes(
@@ -1171,6 +1194,21 @@ mod tests {
         channels: Query<Entity, (With<ChannelValue>, Changed<Text>)>,
         swatches: Query<Entity, (With<SelectedSwatch>, Changed<BackgroundColor>)>,
         thumbs: Query<Entity, (With<SliderThumb>, Changed<Node>)>,
+        debug_nodes: Query<Entity, (Or<(With<ControlPoint>, With<ControlEdge>)>, Changed<Node>)>,
+        debug_transforms: Query<
+            Entity,
+            (
+                Or<(With<ControlPoint>, With<ControlEdge>)>,
+                Changed<UiTransform>,
+            ),
+        >,
+        debug_colors: Query<
+            Entity,
+            (
+                Or<(With<ControlPoint>, With<ControlEdge>)>,
+                Changed<BackgroundColor>,
+            ),
+        >,
         mut changes: ResMut<EditorSyncChanges>,
     ) {
         changes.backgrounds = backgrounds.iter().count();
@@ -1179,6 +1217,9 @@ mod tests {
         changes.channels = channels.iter().count();
         changes.swatches = swatches.iter().count();
         changes.thumbs = thumbs.iter().count();
+        changes.debug_nodes = debug_nodes.iter().count();
+        changes.debug_transforms = debug_transforms.iter().count();
+        changes.debug_colors = debug_colors.iter().count();
     }
 
     fn create_editor_sync_app() -> App {
@@ -1190,6 +1231,19 @@ mod tests {
                 (rebuild_editor, sync_editor, record_editor_sync_changes).chain(),
             );
         app
+    }
+
+    fn snapshot_debug_visuals(
+        world: &mut World,
+    ) -> Vec<(Entity, Node, UiTransform, BackgroundColor)> {
+        let mut visuals = world.query_filtered::<
+            (Entity, &Node, &UiTransform, &BackgroundColor),
+            Or<(With<ControlPoint>, With<ControlEdge>)>,
+        >();
+        visuals
+            .iter(world)
+            .map(|(entity, node, transform, color)| (entity, node.clone(), *transform, *color))
+            .collect()
     }
 
     fn assert_previews_synced(world: &mut World) {
@@ -1286,13 +1340,26 @@ mod tests {
     }
 
     #[test]
-    fn status_only_change_updates_readout_without_invalidating_color_ui_or_previews() {
+    fn status_only_change_updates_readout_without_invalidating_visuals() {
         let mut app = create_editor_sync_app();
         app.update();
         let changes = app.world().resource::<EditorSyncChanges>();
         assert_eq!(changes.channels, 4);
         assert_eq!(changes.swatches, 1);
         assert_eq!(changes.thumbs, 4);
+
+        let canvas = app
+            .world_mut()
+            .query_filtered::<Entity, With<EditorCanvas>>()
+            .single(app.world())
+            .unwrap();
+        app.world_mut()
+            .get_mut::<ComputedNode>(canvas)
+            .unwrap()
+            .size = Vec2::new(400.0, 300.0);
+        app.update();
+        let visuals = snapshot_debug_visuals(app.world_mut());
+        assert!(!visuals.is_empty());
 
         app.world_mut().resource_mut::<EditorState>().status = "Only the status changed".into();
         app.update();
@@ -1303,6 +1370,101 @@ mod tests {
         assert_eq!(changes.thumbs, 0);
         assert_eq!(changes.backgrounds, 0);
         assert_eq!(changes.borders, 0);
+        assert_eq!(changes.debug_nodes, 0);
+        assert_eq!(changes.debug_transforms, 0);
+        assert_eq!(changes.debug_colors, 0);
+        assert_eq!(snapshot_debug_visuals(app.world_mut()), visuals);
+    }
+
+    #[test]
+    fn point_edits_only_update_affected_debug_visuals() {
+        let mut app = App::new();
+        app.insert_resource(EditorState::new())
+            .init_resource::<EditorSyncChanges>()
+            .add_systems(Update, (sync_editor, record_editor_sync_changes).chain());
+        app.world_mut().spawn((
+            EditorCanvas,
+            ComputedNode {
+                size: Vec2::new(400.0, 300.0),
+                ..default()
+            },
+        ));
+        let points = app.world().resource::<EditorState>().mesh.points().to_vec();
+        let selected = app
+            .world_mut()
+            .spawn(create_control_point_handle(7, &points[7], true))
+            .id();
+        app.world_mut()
+            .spawn(create_control_point_handle(0, &points[0], false));
+        let mut edges = Vec::new();
+        for (from, to) in [(7, 8), (0, 1)] {
+            edges.push(
+                app.world_mut()
+                    .spawn((
+                        ControlEdge { from, to, dash: 0 },
+                        Node {
+                            position_type: PositionType::Absolute,
+                            height: px(1.5),
+                            ..default()
+                        },
+                        UiTransform::IDENTITY,
+                        BackgroundColor(Color::WHITE),
+                    ))
+                    .id(),
+            );
+        }
+        app.update();
+        let before = snapshot_debug_visuals(app.world_mut());
+        let mut point = points[7];
+        point.position += Vec2::new(0.07, 0.04);
+        point.color = Color::srgba(0.7, 0.4, 0.3, 0.5);
+        app.world_mut()
+            .resource_mut::<EditorState>()
+            .accept_point(7, point, "point edit");
+        app.update();
+
+        let changes = app.world().resource::<EditorSyncChanges>();
+        assert_eq!(changes.debug_nodes, 2);
+        assert_eq!(changes.debug_transforms, 1);
+        assert_eq!(changes.debug_colors, 1);
+        let node = app.world().get::<Node>(selected).unwrap();
+        assert_eq!(node.left, percent(point.position.x * 100.0));
+        assert_eq!(node.top, percent(point.position.y * 100.0));
+        assert_eq!(
+            app.world().get::<BackgroundColor>(selected).unwrap().0,
+            point.color
+        );
+        let after = snapshot_debug_visuals(app.world_mut());
+        for (before, after) in before.iter().zip(&after) {
+            if before.0 == selected {
+                assert_eq!(before.2, after.2);
+            } else if before.0 == edges[0] {
+                assert_ne!(before.1, after.1);
+                assert_ne!(before.2, after.2);
+            } else {
+                assert_eq!(before, after);
+            }
+        }
+
+        for visible in [false, true] {
+            app.world_mut().resource_mut::<EditorState>().show_debug_ui = visible;
+            app.update();
+            let changes = app.world().resource::<EditorSyncChanges>();
+            assert_eq!(changes.debug_nodes, after.len());
+            assert_eq!(changes.debug_transforms, 0);
+            assert_eq!(changes.debug_colors, 0);
+            for (_, node, _, _) in snapshot_debug_visuals(app.world_mut()) {
+                assert_eq!(
+                    node.display,
+                    if visible {
+                        Display::Flex
+                    } else {
+                        Display::None
+                    }
+                );
+            }
+        }
+        assert_eq!(snapshot_debug_visuals(app.world_mut()), after);
     }
 
     #[derive(Resource, Default)]

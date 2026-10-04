@@ -1573,8 +1573,8 @@ fn prepare_mesh_gradients(
             }
 
             if let Ok(mut gpu) = prepared.get_mut(item.entity()) {
-                if gpu.topology.key != selection.key {
-                    gpu.topology = topology_cache.get(&selection.key, &render_device);
+                if gpu.topology.key != *selection.key {
+                    gpu.topology = topology_cache.get(selection.key, &render_device);
                 }
                 invalid.remove(&mesh.id);
                 continue;
@@ -1616,7 +1616,7 @@ fn prepare_mesh_gradients(
                 &render_device,
                 &render_queue,
             );
-            let topology = topology_cache.get(&selection.key, &render_device);
+            let topology = topology_cache.get(selection.key, &render_device);
             commands.entity(item.entity()).insert(MeshGradientGpu {
                 bind_group,
                 topology,
@@ -2029,6 +2029,7 @@ mod tests {
                     compute_physical_axes(Vec2::splat(64.0), Mat2::IDENTITY),
                 )
                 .key
+                .clone()
         };
         let key = make_key(&create_full_capacity_mesh());
         let small_mesh = MeshGradient::new(
