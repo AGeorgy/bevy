@@ -93,6 +93,10 @@ fn sample_control_position(x: i32, y: i32) -> vec2<f32> {
 fn wrap_mesh_hue(color: vec4<f32>) -> vec4<f32> {
 @if(IN_OKLCH || IN_OKLCH_LONG)
     return vec4(color.xy, fract(color.z), color.a);
+@elif(IN_OKHSL || IN_OKHSL_LONG)
+    // Cubic saturation can overshoot. The shared OKHSL gamut conversion is
+    // defined on 0..1 and has rational poles beyond that domain.
+    return vec4(fract(color.x), clamp(color.y, 0.0, 1.0), color.zw);
 @else
     return vec4(fract(color.x), color.yzw);
 }

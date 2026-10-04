@@ -194,6 +194,23 @@ pub struct UiGradientPipelineKey {
     pub target_format: TextureFormat,
 }
 
+impl UiGradientPipelineKey {
+    fn canonicalize(mut self) -> Self {
+        if self.mesh {
+            // Mesh hue paths are selected when uploading the control grid.
+            // Their GPU conversion and interpolation code is identical.
+            self.color_space = match self.color_space {
+                InterpolationColorSpace::OklchaLong => InterpolationColorSpace::Oklcha,
+                InterpolationColorSpace::HslaLong => InterpolationColorSpace::Hsla,
+                InterpolationColorSpace::HsvaLong => InterpolationColorSpace::Hsva,
+                InterpolationColorSpace::OkhslaLong => InterpolationColorSpace::Okhsla,
+                space => space,
+            };
+        }
+        self
+    }
+}
+
 fn build_mesh_gradient_primitive_state(cull_folds: bool, flipped: bool) -> PrimitiveState {
     PrimitiveState {
         // Parameter triangles are clockwise after the UI coordinate system's
@@ -362,7 +379,6 @@ pub struct ResolvedMeshGradient {
     mesh: MeshGradient,
     bounds: Arc<SurfaceBounds>,
     id: MeshGradientId,
-    display_scale: f32,
 }
 
 #[derive(Resource, Default)]
@@ -770,7 +786,6 @@ pub fn extract_gradients(
                                     mesh: mesh.clone(),
                                     bounds: surface_cache.get(id, mesh),
                                     id,
-                                    display_scale: target.scale_factor(),
                                 }),
                             )
                         }
@@ -890,12 +905,13 @@ pub fn queue_gradient(
                     mesh: is_mesh,
                     mesh_color_interpolation,
                     mesh_border: is_mesh && matches!(gradient.node_type, NodeType::Border(_)),
-                    mesh_clipped: is_mesh && gradient.clip.is_some(),
+                    mesh_clipped: is_mesh && gradient_has_clip_rects(gradient),
                     mesh_cull_folds,
                     mesh_flipped: mesh_cull_folds
                         && gradient.transform.matrix2.determinant().is_sign_negative(),
                     target_format: *target_format,
-                },
+                }
+                .canonicalize(),
             );
 
             transparent_phase.add_transient(TransparentUi {
@@ -1366,11 +1382,10 @@ impl GpuMeshTopologyCache {
         self.entries.insert(key.clone(), gpu.clone());
         gpu
     }
+}
 
-    fn prune(&mut self) {
-        self.entries
-            .retain(|_, topology| Arc::strong_count(topology) > 1);
-    }
+fn prune_unused_mesh_topologies<T>(entries: &mut HashMap<TopologyKey, Arc<T>>) {
+    entries.retain(|_, topology| Arc::strong_count(topology) > 1);
 }
 
 #[derive(Resource, Default)]
@@ -1389,6 +1404,14 @@ fn is_affine_transform_finite(transform: Affine2) -> bool {
     transform.matrix2.x_axis.is_finite()
         && transform.matrix2.y_axis.is_finite()
         && transform.translation.is_finite()
+}
+
+fn gradient_has_clip_rects(gradient: &ExtractedGradient) -> bool {
+    gradient
+        .clip
+        .as_ref()
+        .and_then(CalculatedClip::rects)
+        .is_some_and(|rects| !rects.is_empty())
 }
 
 fn build_mesh_gradient_points_uniform(mesh: &MeshGradient) -> MeshGradientPointsUniform {
@@ -1519,7 +1542,7 @@ fn build_mesh_gradient_style_uniform(
         return Err(MeshUniformError::Invalid);
     }
 
-    let clip_uniform = gradient.clip.as_ref().map(|_| {
+    let clip_uniform = (!clip_rects.is_empty()).then(|| {
         let mut uniform_clip_rects = [Vec4::ZERO; MAX_MESH_GRADIENT_CLIPS];
         let mut clip_transform_x = [Vec4::ZERO; MAX_MESH_GRADIENT_CLIPS];
         let mut clip_transform_y = [Vec4::ZERO; MAX_MESH_GRADIENT_CLIPS];
@@ -1602,7 +1625,6 @@ fn prepare_mesh_gradients(
     mut diagnostics: ResMut<MeshGradientDiagnostics>,
     mut prepared: Query<&mut MeshGradientGpu>,
 ) {
-    topology_cache.prune();
     let active: HashSet<_> = extracted_gradients
         .items
         .values()
@@ -1632,11 +1654,7 @@ fn prepare_mesh_gradients(
             {
                 continue;
             }
-            let axes = compute_physical_axes(
-                gradient.rect.size(),
-                gradient.transform.matrix2,
-                mesh.display_scale,
-            );
+            let axes = compute_physical_axes(gradient.rect.size(), gradient.transform.matrix2);
             let selection = quality_cache
                 .states
                 .entry(mesh.id)
@@ -1707,6 +1725,10 @@ fn prepare_mesh_gradients(
         }
     }
 
+    // Extraction may have replaced every entity using a topology. Reacquire
+    // current-frame owners before releasing entries with no remaining users.
+    // Deferred component insertions already hold their topology references.
+    prune_unused_mesh_topologies(&mut topology_cache.entries);
     quality_cache.states.retain(|id, _| active.contains(id));
     surface_cache.retain(&active);
     binding_cache.retain(&active);
@@ -2074,6 +2096,189 @@ mod tests {
             border: BorderRect::default(),
             resolved_gradient: ResolvedGradient::Linear { angle: 0.0 },
             color_space: InterpolationColorSpace::LinearRgba,
+        }
+    }
+
+    #[test]
+    fn empty_clipping_uses_the_unclipped_mesh_resources() {
+        let mesh = create_full_capacity_mesh();
+        for clip in [None, Some(CalculatedClip::Rects(SmallVec::new()))] {
+            let gradient = create_extracted_gradient(clip);
+            assert!(!gradient_has_clip_rects(&gradient));
+            let (_, clip_uniform) = build_mesh_gradient_style_uniform(&gradient, &mesh).unwrap();
+            assert!(clip_uniform.is_none());
+        }
+        let fully_clipped = create_extracted_gradient(Some(CalculatedClip::FullyClipped));
+        assert!(matches!(
+            build_mesh_gradient_style_uniform(&fully_clipped, &mesh),
+            Err(MeshUniformError::FullyClipped)
+        ));
+    }
+
+    #[test]
+    fn topology_survives_render_entity_replacement_and_deferred_insertion() {
+        use bevy_ecs::world::{CommandQueue, World};
+
+        #[derive(Component)]
+        struct TopologyOwner(Arc<()>);
+
+        let make_key = |mesh: &MeshGradient| {
+            QualityState::default()
+                .update(
+                    &Arc::new(SurfaceBounds::new(mesh)),
+                    compute_physical_axes(Vec2::splat(64.0), bevy_math::Mat2::IDENTITY),
+                )
+                .key
+        };
+        let key = make_key(&create_full_capacity_mesh());
+        let small_mesh = MeshGradient::new(
+            2,
+            2,
+            [Vec2::ZERO, Vec2::X, Vec2::Y, Vec2::ONE]
+                .map(|position| MeshGradientPoint::new(position, Color::WHITE))
+                .to_vec(),
+        )
+        .unwrap();
+        let unused_key = make_key(&small_mesh);
+        let mut cache =
+            HashMap::from_iter([(key.clone(), Arc::new(())), (unused_key, Arc::new(()))]);
+        let mut world = World::new();
+        let previous = world.spawn(TopologyOwner(Arc::clone(&cache[&key]))).id();
+        let mut queue = CommandQueue::default();
+        Commands::new(&mut queue, &world).entity(previous).despawn();
+        queue.apply(&mut world);
+        assert_eq!(Arc::strong_count(&cache[&key]), 1);
+
+        // Preparation reacquires the cached buffer before it sweeps unused
+        // entries. The pending insertion owns it before commands are applied.
+        let current = Commands::new(&mut queue, &world)
+            .spawn(TopologyOwner(Arc::clone(&cache[&key])))
+            .id();
+        prune_unused_mesh_topologies(&mut cache);
+        assert_eq!(cache.len(), 1);
+        queue.apply(&mut world);
+        assert!(Arc::ptr_eq(
+            &cache[&key],
+            &world.get::<TopologyOwner>(current).unwrap().0,
+        ));
+
+        world.despawn(current);
+        prune_unused_mesh_topologies(&mut cache);
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn mesh_pipeline_keys_share_hue_paths_without_changing_uploaded_colors() {
+        let pairs = [
+            (
+                InterpolationColorSpace::Oklcha,
+                InterpolationColorSpace::OklchaLong,
+            ),
+            (
+                InterpolationColorSpace::Hsla,
+                InterpolationColorSpace::HslaLong,
+            ),
+            (
+                InterpolationColorSpace::Hsva,
+                InterpolationColorSpace::HsvaLong,
+            ),
+            (
+                InterpolationColorSpace::Okhsla,
+                InterpolationColorSpace::OkhslaLong,
+            ),
+        ];
+        let mut shader_cache = create_gradient_shader_cache();
+        let mut permutation = 0;
+        for (short, long) in pairs {
+            for interpolation in [
+                MeshGradientColorInterpolation::Vertex,
+                MeshGradientColorInterpolation::Bicubic,
+            ] {
+                let short_key = UiGradientPipelineKey {
+                    anti_alias: true,
+                    color_space: short,
+                    mesh: true,
+                    mesh_color_interpolation: interpolation,
+                    mesh_border: false,
+                    mesh_clipped: false,
+                    mesh_cull_folds: false,
+                    mesh_flipped: false,
+                    target_format: TextureFormat::Rgba8UnormSrgb,
+                };
+                let long_key = UiGradientPipelineKey {
+                    color_space: long,
+                    ..short_key
+                };
+                assert_eq!(short_key.canonicalize(), long_key.canonicalize());
+                let regular_key = UiGradientPipelineKey {
+                    mesh: false,
+                    ..long_key
+                };
+                assert_eq!(regular_key.canonicalize().color_space, long);
+
+                let compiled_short = shader_cache
+                    .get(
+                        permutation,
+                        create_shader_id(1),
+                        &build_gradient_shader_defs(short_key),
+                    )
+                    .unwrap()
+                    .to_string();
+                permutation += 1;
+                let compiled_long = shader_cache
+                    .get(
+                        permutation,
+                        create_shader_id(1),
+                        &build_gradient_shader_defs(long_key),
+                    )
+                    .unwrap()
+                    .to_string();
+                permutation += 1;
+                // WESL may emit independent declarations in a different
+                // order. Compare complete declarations, preserving every
+                // function's statement order and expression text.
+                let declarations = |source: &str| {
+                    let mut result = Vec::new();
+                    let mut depth = 0usize;
+                    let mut start = 0;
+                    for (index, character) in source.char_indices() {
+                        match character {
+                            '{' => depth += 1,
+                            '}' => depth -= 1,
+                            _ => {}
+                        }
+                        if depth == 0 && matches!(character, '}' | ';') {
+                            result.push(source[start..=index].trim().to_string());
+                            start = index + 1;
+                        }
+                    }
+                    assert!(source[start..].trim().is_empty());
+                    result.sort_unstable();
+                    result
+                };
+                assert_eq!(declarations(&compiled_short), declarations(&compiled_long));
+
+                let make_mesh = |space: MeshGradientColorSpace| {
+                    MeshGradient::new_in_color_space(
+                        2,
+                        2,
+                        [
+                            (Vec2::ZERO, Color::hsla(350.0, 0.8, 0.5, 1.0)),
+                            (Vec2::X, Color::hsla(10.0, 0.8, 0.5, 1.0)),
+                            (Vec2::Y, Color::hsla(350.0, 0.8, 0.5, 1.0)),
+                            (Vec2::ONE, Color::hsla(10.0, 0.8, 0.5, 1.0)),
+                        ]
+                        .map(|(position, color)| MeshGradientPoint::new(position, color))
+                        .to_vec(),
+                        space,
+                    )
+                    .unwrap()
+                    .with_color_interpolation(interpolation)
+                };
+                let short_points = build_mesh_gradient_points_uniform(&make_mesh(short.into()));
+                let long_points = build_mesh_gradient_points_uniform(&make_mesh(long.into()));
+                assert_ne!(short_points.colors[..4], long_points.colors[..4]);
+            }
         }
     }
 

@@ -1,5 +1,5 @@
 //! Internal adaptive mesh-gradient preparation. The renderer supplies physical
-//! screen axes, including node size, transform and display scale exactly once.
+//! screen axes from the already-physical node size and its transform.
 //!
 //! Geometry uses patch-local Hessian remainder bounds for linear triangular
 //! interpolation. Cartesian colors are evaluated at tessellation vertices;
@@ -12,6 +12,7 @@
 
 use crate::gradient::convert_color_to_space;
 use bevy_math::{DVec2, Mat2, Vec2};
+use bevy_platform::sync::Arc;
 use bevy_ui::{MeshGradient, MeshGradientColorInterpolation};
 use bytemuck::{Pod, Zeroable};
 use smallvec::SmallVec;
@@ -32,16 +33,12 @@ type Point = [f64; 6];
 #[cfg(test)]
 type Patch = [Point; 16];
 
-/// `node_size` is logical; `display_scale` converts it to physical pixels.
+/// `node_size` is already measured in physical pixels by UI layout.
 /// Translation does not affect interpolation error and is deliberately absent.
-pub(crate) fn compute_physical_axes(
-    node_size: Vec2,
-    transform: Mat2,
-    display_scale: f32,
-) -> [DVec2; 2] {
+pub(crate) fn compute_physical_axes(node_size: Vec2, transform: Mat2) -> [DVec2; 2] {
     [
-        transform.x_axis.as_dvec2() * (node_size.x as f64 * display_scale as f64),
-        transform.y_axis.as_dvec2() * (node_size.y as f64 * display_scale as f64),
+        transform.x_axis.as_dvec2() * node_size.x as f64,
+        transform.y_axis.as_dvec2() * node_size.y as f64,
     ]
 }
 
@@ -351,38 +348,69 @@ pub(crate) struct QualityState {
     capped: bool,
     report_cooldown: u8,
     screen_bounds: ScreenBounds,
+    cached_input: Option<(Arc<SurfaceBounds>, [DVec2; 2])>,
+    cached_error: Option<ErrorBound>,
+    cached_demotion: Option<(TopologyKey, ErrorBound)>,
 }
 
 impl QualityState {
-    pub fn update(&mut self, bounds: &SurfaceBounds, screen_axes: [DVec2; 2]) -> QualitySelection {
+    pub fn update(
+        &mut self,
+        bounds: &Arc<SurfaceBounds>,
+        screen_axes: [DVec2; 2],
+    ) -> QualitySelection {
         self.report_cooldown = self.report_cooldown.saturating_sub(1);
+        let unchanged = self
+            .cached_input
+            .as_ref()
+            .is_some_and(|(previous, axes)| Arc::ptr_eq(previous, bounds) && *axes == screen_axes);
         let mut screen_bounds = core::mem::take(&mut self.screen_bounds);
-        bounds.update_screen(screen_axes, &mut screen_bounds);
+        if !unchanged {
+            bounds.update_screen(screen_axes, &mut screen_bounds);
+            self.cached_input = Some((Arc::clone(bounds), screen_axes));
+            self.cached_error = None;
+            self.cached_demotion = None;
+        }
         let bounds = &screen_bounds;
-        let minimum = TopologyKey::new_uniform(bounds.width, bounds.height, MIN_SUBDIVISIONS);
-        let chosen;
+        let (chosen, error);
         if let Some(previous) = self
             .key
             .as_ref()
-            .filter(|key| key.has_same_dimensions(&minimum))
+            .filter(|key| key.width == bounds.width && key.height == bounds.height)
         {
-            if !bounds
-                .estimate_error_bound(previous)
-                .meets_tolerance(GEOMETRY_LIMIT, 1.0)
-            {
-                chosen = bounds.refine(previous.clone(), GEOMETRY_LIMIT, 1.0, None);
+            let previous_error = self
+                .cached_error
+                .unwrap_or_else(|| bounds.estimate_error_bound(previous));
+            if !previous_error.meets_tolerance(GEOMETRY_LIMIT, 1.0) {
+                // An unchanged capped selection has already exhausted its
+                // permitted refinements. Its diagnostic still advances below.
+                chosen = if unchanged {
+                    previous.clone()
+                } else {
+                    bounds.refine(previous.clone(), GEOMETRY_LIMIT, 1.0, None)
+                };
+                error = if chosen == *previous {
+                    previous_error
+                } else {
+                    bounds.estimate_error_bound(&chosen)
+                };
                 self.below_half = 0;
                 self.demotion_candidate = None;
+                self.cached_demotion = None;
             } else {
-                let candidate = bounds.refine(minimum.clone(), GEOMETRY_LIMIT, 0.5, Some(previous));
-                if self.demotion_candidate.as_ref() != Some(&candidate) {
+                let (candidate, candidate_error) = self.cached_demotion.get_or_insert_with(|| {
+                    let minimum =
+                        TopologyKey::new_uniform(bounds.width, bounds.height, MIN_SUBDIVISIONS);
+                    let candidate = bounds.refine(minimum, GEOMETRY_LIMIT, 0.5, Some(previous));
+                    let error = bounds.estimate_error_bound(&candidate);
+                    (candidate, error)
+                });
+                if self.demotion_candidate.as_ref() != Some(&*candidate) {
                     self.below_half = 0;
                 }
                 self.demotion_candidate = Some(candidate.clone());
                 if candidate.count_triangles() < previous.count_triangles()
-                    && bounds
-                        .estimate_error_bound(&candidate)
-                        .meets_tolerance(GEOMETRY_LIMIT, 0.5)
+                    && candidate_error.meets_tolerance(GEOMETRY_LIMIT, 0.5)
                 {
                     self.below_half += 1;
                 } else {
@@ -390,24 +418,31 @@ impl QualityState {
                 }
                 if self.below_half < DEMOTION_FRAMES {
                     chosen = previous.clone();
+                    error = previous_error;
                 } else {
-                    chosen = candidate;
+                    chosen = candidate.clone();
+                    error = *candidate_error;
                     self.below_half = 0;
                 }
             }
         } else {
+            let minimum = TopologyKey::new_uniform(bounds.width, bounds.height, MIN_SUBDIVISIONS);
             chosen = bounds.refine(minimum, GEOMETRY_LIMIT, 1.0, None);
+            error = bounds.estimate_error_bound(&chosen);
             self.below_half = 0;
             self.demotion_candidate = None;
         }
-        let error = bounds.estimate_error_bound(&chosen);
         let capped = !error.meets_tolerance(GEOMETRY_LIMIT, 1.0);
         let report_cap = capped && !self.capped && self.report_cooldown == 0;
         if report_cap {
             self.report_cooldown = 120;
         }
         self.capped = capped;
+        if self.key.as_ref() != Some(&chosen) {
+            self.cached_demotion = None;
+        }
         self.key = Some(chosen.clone());
+        self.cached_error = Some(error);
         self.screen_bounds = screen_bounds;
         QualitySelection {
             key: chosen,
@@ -1019,6 +1054,10 @@ mod tests {
     use bevy_math::Vec2;
     use bevy_ui::{MeshGradientColorSpace, MeshGradientGeometry, MeshGradientPoint};
 
+    fn create_surface_bounds(mesh: &MeshGradient) -> Arc<SurfaceBounds> {
+        Arc::new(SurfaceBounds::new(mesh))
+    }
+
     fn build_reference_interval_patches(mesh: &MeshGradient) -> SmallVec<[IntervalPatch<6>; 9]> {
         let values: SmallVec<[Point; 16]> = mesh
             .points()
@@ -1287,7 +1326,7 @@ mod tests {
 
     #[test]
     fn affine_minimum_and_curvature_resize_promotion() {
-        let affine = SurfaceBounds::new(&create_test_mesh(
+        let affine = create_surface_bounds(&create_test_mesh(
             2,
             0.0,
             1.0,
@@ -1300,7 +1339,7 @@ mod tests {
                 .find_maximum_subdivisions(),
             MIN_SUBDIVISIONS
         );
-        let curved = SurfaceBounds::new(&create_test_mesh(
+        let curved = create_surface_bounds(&create_test_mesh(
             3,
             0.04,
             1.0,
@@ -1321,7 +1360,7 @@ mod tests {
             MeshGradientColorSpace::Srgba,
             MeshGradientColorSpace::Oklaba,
         ] {
-            let vivid = SurfaceBounds::new(&create_checkerboard_mesh(
+            let vivid = create_surface_bounds(&create_checkerboard_mesh(
                 1.0,
                 space,
                 MeshGradientColorInterpolation::Vertex,
@@ -1334,7 +1373,7 @@ mod tests {
             let subpixel = QualityState::default().update(&vivid, create_screen_axes(1.0));
             assert_eq!(subpixel.key.find_maximum_subdivisions(), MIN_SUBDIVISIONS);
 
-            let quiet = SurfaceBounds::new(&create_checkerboard_mesh(
+            let quiet = create_surface_bounds(&create_checkerboard_mesh(
                 0.001,
                 space,
                 MeshGradientColorInterpolation::Vertex,
@@ -1347,7 +1386,7 @@ mod tests {
                 MIN_SUBDIVISIONS
             );
 
-            let bicubic = SurfaceBounds::new(&create_checkerboard_mesh(
+            let bicubic = create_surface_bounds(&create_checkerboard_mesh(
                 1.0,
                 space,
                 MeshGradientColorInterpolation::Bicubic,
@@ -1378,11 +1417,11 @@ mod tests {
                     assert!((actual - expected).abs() < 1e-5);
                 }
             }
-            let before = SurfaceBounds::new(&grid);
+            let before = create_surface_bounds(&grid);
             let before = QualityState::default().update(&before, create_screen_axes(4096.0));
             grid.try_set_color(0, Color::hsva(350.0, 1.0, 1.0, 1.0))
                 .unwrap();
-            let after = SurfaceBounds::new(&grid);
+            let after = create_surface_bounds(&grid);
             let after = QualityState::default().update(&after, create_screen_axes(4096.0));
             assert_eq!(before.key, after.key);
             assert_eq!(after.key.find_maximum_subdivisions(), MIN_SUBDIVISIONS);
@@ -1393,15 +1432,15 @@ mod tests {
     #[test]
     fn bicubic_color_does_not_drive_geometry_tessellation_and_scale_is_physical() {
         assert_eq!(
-            compute_physical_axes(Vec2::splat(256.0), Mat2::IDENTITY, 2.0),
-            create_screen_axes(512.0)
+            compute_physical_axes(Vec2::splat(256.0), Mat2::IDENTITY),
+            create_screen_axes(256.0)
         );
         let mut quiet_mesh = create_test_mesh(3, 0.04, 0.0, MeshGradientColorSpace::LinearRgba);
         quiet_mesh.set_color_interpolation(MeshGradientColorInterpolation::Bicubic);
         let mut vivid_mesh = create_test_mesh(3, 0.04, 8.0, MeshGradientColorSpace::LinearRgba);
         vivid_mesh.set_color_interpolation(MeshGradientColorInterpolation::Bicubic);
-        let quiet = SurfaceBounds::new(&quiet_mesh);
-        let vivid = SurfaceBounds::new(&vivid_mesh);
+        let quiet = create_surface_bounds(&quiet_mesh);
+        let vivid = create_surface_bounds(&vivid_mesh);
         let a = QualityState::default().update(&quiet, create_screen_axes(1.0));
         let b = QualityState::default().update(&vivid, create_screen_axes(1.0));
         assert_eq!(b.key, a.key);
@@ -1434,13 +1473,13 @@ mod tests {
 
     #[test]
     fn demotion_waits_eight_consecutive_frames() {
-        let curved = SurfaceBounds::new(&create_test_mesh(
+        let curved = create_surface_bounds(&create_test_mesh(
             3,
             0.04,
             0.0,
             MeshGradientColorSpace::LinearRgba,
         ));
-        let flat = SurfaceBounds::new(&create_test_mesh(
+        let flat = create_surface_bounds(&create_test_mesh(
             3,
             0.0,
             0.0,
@@ -1465,8 +1504,115 @@ mod tests {
     }
 
     #[test]
+    fn cached_quality_matches_rebuilt_bounds_through_frame_transitions() {
+        fn compare_frames(
+            mesh: &MeshGradient,
+            axes: [DVec2; 2],
+            frames: usize,
+            cached: &mut QualityState,
+            rebuilt: &mut QualityState,
+        ) -> QualitySelection {
+            let bounds = create_surface_bounds(mesh);
+            let mut last = None;
+            for frame in 0..frames {
+                let actual = cached.update(&bounds, axes);
+                // A new immutable input on each frame forces all numerical
+                // work, while preserving the same frame-history decisions.
+                let expected = rebuilt.update(&create_surface_bounds(mesh), axes);
+                assert_eq!(actual.key, expected.key, "frame {frame}");
+                assert_eq!(
+                    actual.error.geometry.to_bits(),
+                    expected.error.geometry.to_bits()
+                );
+                assert_eq!(actual.error.color.to_bits(), expected.error.color.to_bits());
+                assert_eq!(actual.report_cap, expected.report_cap, "frame {frame}");
+                last = Some(actual);
+            }
+            last.unwrap()
+        }
+
+        let mut cached = QualityState::default();
+        let mut rebuilt = QualityState::default();
+        let mut checker = create_test_mesh(16, 0.0, 0.0, MeshGradientColorSpace::LinearRgba);
+        checker
+            .try_edit_points(|points| {
+                for (index, point) in points.iter_mut().enumerate() {
+                    let red = ((index % 16 + index / 16) % 2) as f32;
+                    point.color = Color::linear_rgba(red, 0.0, 0.0, 1.0);
+                }
+                Ok(())
+            })
+            .unwrap();
+        for (axes, frames) in [
+            (create_screen_axes(512.0), 10),
+            (create_screen_axes(4096.0), 3),
+            ([-DVec2::X * 4096.0, DVec2::Y * 4096.0], 3),
+            (create_screen_axes(16.0), 10),
+        ] {
+            compare_frames(&checker, axes, frames, &mut cached, &mut rebuilt);
+        }
+        let center = checker.points()[136].position;
+        checker
+            .try_set_position(136, center + Vec2::new(0.01, 0.0))
+            .unwrap();
+        compare_frames(
+            &checker,
+            create_screen_axes(512.0),
+            10,
+            &mut cached,
+            &mut rebuilt,
+        );
+        checker.try_set_color(136, Color::WHITE).unwrap();
+        compare_frames(
+            &checker,
+            create_screen_axes(512.0),
+            10,
+            &mut cached,
+            &mut rebuilt,
+        );
+
+        let curved = create_test_mesh(3, 0.1, 0.0, MeshGradientColorSpace::LinearRgba);
+        compare_frames(
+            &curved,
+            create_screen_axes(4096.0),
+            3,
+            &mut cached,
+            &mut rebuilt,
+        );
+        let demoted = compare_frames(
+            &curved,
+            create_screen_axes(1.0),
+            8,
+            &mut cached,
+            &mut rebuilt,
+        );
+        assert_eq!(demoted.key.find_maximum_subdivisions(), MIN_SUBDIVISIONS);
+
+        let cap = create_test_mesh(16, 0.005, 1.0, MeshGradientColorSpace::LinearRgba);
+        let capped = compare_frames(&cap, create_screen_axes(1e10), 1, &mut cached, &mut rebuilt);
+        assert!(capped.report_cap);
+        assert!(!capped.error.meets_tolerance(GEOMETRY_LIMIT, 1.0));
+        let stable_cap =
+            compare_frames(&cap, create_screen_axes(1e10), 3, &mut cached, &mut rebuilt);
+        assert!(!stable_cap.report_cap);
+        let flat = create_test_mesh(2, 0.0, 0.0, MeshGradientColorSpace::LinearRgba);
+        compare_frames(&flat, create_screen_axes(1.0), 1, &mut cached, &mut rebuilt);
+        let early = compare_frames(&cap, create_screen_axes(1e10), 1, &mut cached, &mut rebuilt);
+        assert!(!early.report_cap);
+        compare_frames(
+            &flat,
+            create_screen_axes(1.0),
+            120,
+            &mut cached,
+            &mut rebuilt,
+        );
+        let later = compare_frames(&cap, create_screen_axes(1e10), 1, &mut cached, &mut rebuilt);
+        assert!(later.report_cap);
+    }
+
+    #[test]
     fn demotion_can_choose_an_intermediate_safe_tier() {
-        let bounds = SurfaceBounds {
+        let bounds = Arc::new(SurfaceBounds {
             width: 2,
             height: 2,
             patches: Box::new([PatchBounds {
@@ -1478,7 +1624,7 @@ mod tests {
                 edge_vv: [VectorBounds::from_exact_value(DVec2::ZERO); 2],
                 color_uv: 0.0,
             }]),
-        };
+        });
         let mut state = QualityState::default();
         assert_eq!(
             state
@@ -1510,7 +1656,7 @@ mod tests {
     fn alpha_alone_does_not_promote_geometry_quality() {
         let mut grid = create_test_mesh(3, 0.02, 0.0, MeshGradientColorSpace::LinearRgba);
         let quiet =
-            QualityState::default().update(&SurfaceBounds::new(&grid), create_screen_axes(1.0));
+            QualityState::default().update(&create_surface_bounds(&grid), create_screen_axes(1.0));
         grid.try_edit_points(|points| {
             for point in points {
                 point.color = Color::linear_rgba(0.0, 0.0, 0.0, point.position.x);
@@ -1519,13 +1665,13 @@ mod tests {
         })
         .unwrap();
         let alpha =
-            QualityState::default().update(&SurfaceBounds::new(&grid), create_screen_axes(1.0));
+            QualityState::default().update(&create_surface_bounds(&grid), create_screen_axes(1.0));
         assert_eq!(alpha.key, quiet.key);
     }
 
     #[test]
     fn cap_is_visible_bounded_and_reported_once() {
-        let bounds = SurfaceBounds::new(&create_test_mesh(
+        let bounds = create_surface_bounds(&create_test_mesh(
             16,
             0.005,
             1.0,
@@ -1554,11 +1700,11 @@ mod tests {
         })
         .unwrap();
         let hdr_key = QualityState::default()
-            .update(&SurfaceBounds::new(&hdr), create_screen_axes(4096.0))
+            .update(&create_surface_bounds(&hdr), create_screen_axes(4096.0))
             .key;
         let ordinary_key = QualityState::default()
             .update(
-                &SurfaceBounds::new(&create_test_mesh(
+                &create_surface_bounds(&create_test_mesh(
                     3,
                     0.02,
                     1.0,
@@ -1574,12 +1720,15 @@ mod tests {
     fn point_edits_reuse_selected_topology_and_grid_changes_reset_state() {
         let mut grid = create_test_mesh(3, 0.02, 1.0, MeshGradientColorSpace::LinearRgba);
         let mut state = QualityState::default();
-        let first = state.update(&SurfaceBounds::new(&grid), create_screen_axes(512.0));
+        let first = state.update(&create_surface_bounds(&grid), create_screen_axes(512.0));
         grid.try_set_position(4, Vec2::new(0.52001, 0.5)).unwrap();
-        let next = state.update(&SurfaceBounds::new(&grid), create_screen_axes(512.0));
+        let next = state.update(&create_surface_bounds(&grid), create_screen_axes(512.0));
         assert_eq!(first.key, next.key);
         let replacement = create_test_mesh(16, 0.0, 1.0, MeshGradientColorSpace::LinearRgba);
-        let changed = state.update(&SurfaceBounds::new(&replacement), create_screen_axes(512.0));
+        let changed = state.update(
+            &create_surface_bounds(&replacement),
+            create_screen_axes(512.0),
+        );
         assert_eq!(changed.key.width, 16);
         assert_eq!(changed.key.find_maximum_subdivisions(), MIN_SUBDIVISIONS);
     }
@@ -1606,7 +1755,7 @@ mod tests {
 
     #[test]
     fn localized_curvature_refines_only_the_axes_that_need_it() {
-        let bounds = SurfaceBounds {
+        let bounds = Arc::new(SurfaceBounds {
             width: 3,
             height: 2,
             patches: Box::new([
@@ -1629,7 +1778,7 @@ mod tests {
                     color_uv: 0.0,
                 },
             ]),
-        };
+        });
         let selection = QualityState::default().update(&bounds, create_screen_axes(1024.0));
 
         assert_eq!(selection.key.u_subdivisions(0, 0), 8);
@@ -1715,7 +1864,7 @@ mod tests {
         )
         .unwrap();
         let selection = QualityState::default().update(
-            &SurfaceBounds::new(&mesh),
+            &create_surface_bounds(&mesh),
             [DVec2::X * 1_125.0, DVec2::Y * 866.0],
         );
         let global = TopologyKey::new_uniform(5, 4, selection.key.find_maximum_subdivisions());
@@ -1802,6 +1951,119 @@ mod tests {
         core::array::from_fn(|channel| start[channel] + (end[channel] - start[channel]) * weight)
     }
 
+    fn measure_dense_geometry_error(
+        grid: &MeshGradient,
+        topology: &TopologyKey,
+        screen_axes: [DVec2; 2],
+        offsets: &[DVec2],
+    ) -> f64 {
+        let mut maximum = 0.0_f64;
+        for (patch_index, patch) in build_reference_patches(grid).into_iter().enumerate() {
+            let column = patch_index % (grid.width() - 1);
+            let row = patch_index / (grid.width() - 1);
+            let columns = topology.u_subdivisions(column, row);
+            let rows = topology.v_subdivisions(column, row);
+            let step = DVec2::new(1.0 / columns as f64, 1.0 / rows as f64);
+            for y in 0..rows {
+                for x in 0..columns {
+                    for &offset in offsets {
+                        let a = DVec2::new(x as f64 / columns as f64, y as f64 / rows as f64);
+                        let p = a + offset * step;
+                        let q = evaluate_reference_patch(&patch, p);
+                        let corners = if offset.x >= offset.y {
+                            [
+                                (a, 1.0 - offset.x),
+                                (a + DVec2::X * step.x, offset.x - offset.y),
+                                (a + step, offset.y),
+                            ]
+                        } else {
+                            [
+                                (a, 1.0 - offset.y),
+                                (a + step, offset.x),
+                                (a + DVec2::Y * step.y, offset.y - offset.x),
+                            ]
+                        };
+                        let approximate: DVec2 = corners
+                            .into_iter()
+                            .map(|(uv, w)| {
+                                let q = evaluate_topology_vertex(&patch, uv, column, row, topology);
+                                DVec2::new(q[0], q[1]) * w
+                            })
+                            .sum();
+                        let delta = DVec2::new(q[0], q[1]) - approximate;
+                        let error = (screen_axes[0] * delta.x + screen_axes[1] * delta.y).length();
+                        maximum = maximum.max(error);
+                    }
+                }
+            }
+        }
+        maximum
+    }
+
+    #[test]
+    fn center_displacement_matches_independent_cardinal_basis() {
+        // A regular 3x3 grid with only its center displaced is the affine
+        // surface plus one separable cardinal basis function. These closed
+        // forms are independent of the interval/Bezier conversion above.
+        fn center_influence(patch: usize, t: f64) -> f64 {
+            if patch == 0 {
+                t + t * t - t * t * t
+            } else {
+                1.0 - 2.0 * t * t + t * t * t
+            }
+        }
+        let mesh = create_test_mesh(3, 0.1, 0.0, MeshGradientColorSpace::LinearRgba);
+        let displacement = f64::from(mesh.points()[4].position.x) - 0.5;
+        for (index, patch) in build_reference_patches(&mesh).into_iter().enumerate() {
+            let column = index % 2;
+            let row = index / 2;
+            for y in 0..=16 {
+                for x in 0..=16 {
+                    let uv = DVec2::new(x as f64 / 16.0, y as f64 / 16.0);
+                    let expected = DVec2::new(
+                        (column as f64 + uv.x) * 0.5
+                            + displacement
+                                * center_influence(column, uv.x)
+                                * center_influence(row, uv.y),
+                        (row as f64 + uv.y) * 0.5,
+                    );
+                    let actual = evaluate_reference_patch(&patch, uv);
+                    assert!((DVec2::new(actual[0], actual[1]) - expected).length() < 1e-14);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn physical_size_is_independent_of_display_scale_and_respects_pixel_error() {
+        let mesh = create_test_mesh(3, 0.1, 0.0, MeshGradientColorSpace::LinearRgba);
+        let bounds = create_surface_bounds(&mesh);
+        let offsets: Vec<_> = (1..20)
+            .flat_map(|y| (1..20).map(move |x| DVec2::new(x as f64 / 20.0, y as f64 / 20.0)))
+            .collect();
+        let mut expected_key = None;
+        for display_scale in [0.5, 1.0, 2.0] {
+            // UI layout applies display scale before populating ComputedNode.
+            let logical_size = Vec2::splat(256.0 / display_scale);
+            let physical_size = logical_size * display_scale;
+            let axes = compute_physical_axes(physical_size, Mat2::IDENTITY);
+            assert_eq!(axes, create_screen_axes(256.0));
+            let selected = QualityState::default().update(&bounds, axes);
+            if let Some(key) = &expected_key {
+                assert_eq!(&selected.key, key);
+            }
+            expected_key = Some(selected.key.clone());
+            let measured = measure_dense_geometry_error(&mesh, &selected.key, axes, &offsets);
+            assert!(measured <= selected.error.geometry + 1e-9);
+            assert!(measured <= GEOMETRY_LIMIT);
+        }
+        let transform = Mat2::from_cols(Vec2::new(-2.0, 0.25), Vec2::new(0.5, 1.0));
+        assert_eq!(
+            compute_physical_axes(Vec2::new(256.0, 128.0), transform),
+            [DVec2::new(-512.0, 64.0), DVec2::new(64.0, 128.0)]
+        );
+    }
+
     #[test]
     fn dense_geometry_reference_is_below_estimator() {
         for size in [2, 3, 4, 16] {
@@ -1811,7 +2073,7 @@ mod tests {
                 1.0,
                 MeshGradientColorSpace::LinearRgba,
             );
-            let bounds = SurfaceBounds::new(&grid);
+            let bounds = create_surface_bounds(&grid);
             for screen in [256.0, 1024.0, 4096.0] {
                 for screen_axes in [
                     create_screen_axes(screen),
@@ -1826,62 +2088,17 @@ mod tests {
                         "size={size}, screen={screen}, error={:?}",
                         chosen.error
                     );
-                    for (patch_index, patch) in
-                        build_reference_patches(&grid).into_iter().enumerate()
-                    {
-                        let column = patch_index % (size - 1);
-                        let row = patch_index / (size - 1);
-                        let columns = chosen.key.u_subdivisions(column, row);
-                        let rows = chosen.key.v_subdivisions(column, row);
-                        let step = DVec2::new(1.0 / columns as f64, 1.0 / rows as f64);
-                        for y in 0..rows {
-                            for x in 0..columns {
-                                for offset in [
-                                    DVec2::new(0.2, 0.7),
-                                    DVec2::new(0.7, 0.2),
-                                    DVec2::splat(0.5),
-                                ] {
-                                    let a = DVec2::new(
-                                        x as f64 / columns as f64,
-                                        y as f64 / rows as f64,
-                                    );
-                                    let p = a + offset * step;
-                                    let q = evaluate_reference_patch(&patch, p);
-                                    let corners = if offset.x >= offset.y {
-                                        [
-                                            (a, 1.0 - offset.x),
-                                            (a + DVec2::X * step.x, offset.x - offset.y),
-                                            (a + step, offset.y),
-                                        ]
-                                    } else {
-                                        [
-                                            (a, 1.0 - offset.y),
-                                            (a + step, offset.x),
-                                            (a + DVec2::Y * step.y, offset.y - offset.x),
-                                        ]
-                                    };
-                                    let approximate: DVec2 = corners
-                                        .into_iter()
-                                        .map(|(uv, w)| {
-                                            let q = evaluate_topology_vertex(
-                                                &patch,
-                                                uv,
-                                                column,
-                                                row,
-                                                &chosen.key,
-                                            );
-                                            DVec2::new(q[0], q[1]) * w
-                                        })
-                                        .sum();
-                                    let delta = DVec2::new(q[0], q[1]) - approximate;
-                                    let error = (screen_axes[0] * delta.x
-                                        + screen_axes[1] * delta.y)
-                                        .length();
-                                    assert!(error <= chosen.error.geometry + 1e-9);
-                                }
-                            }
-                        }
-                    }
+                    let measured = measure_dense_geometry_error(
+                        &grid,
+                        &chosen.key,
+                        screen_axes,
+                        &[
+                            DVec2::new(0.2, 0.7),
+                            DVec2::new(0.7, 0.2),
+                            DVec2::splat(0.5),
+                        ],
+                    );
+                    assert!(measured <= chosen.error.geometry + 1e-9);
                 }
             }
         }

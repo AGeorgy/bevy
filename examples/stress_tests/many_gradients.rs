@@ -209,6 +209,8 @@ struct BenchmarkSamples {
     update_cpu_ms: Vec<f64>,
     ui_cpu_ms: Vec<f64>,
     ui_gpu_ms: Vec<f64>,
+    last_ui_cpu_measurement: Option<Instant>,
+    last_ui_gpu_measurement: Option<Instant>,
 }
 
 fn animate_gradients(
@@ -319,20 +321,19 @@ fn collect_benchmark(
     samples.total_ms.push(time.delta_secs_f64() * 1_000.0);
     let update_cpu_ms = samples.last_update_cpu_ms;
     samples.update_cpu_ms.push(update_cpu_ms);
-    if let Some(value) = diagnostics
-        .get(&UI_CPU_TIME)
-        .and_then(|diagnostic| diagnostic.measurement())
-        .map(|measurement| measurement.value)
-    {
-        samples.ui_cpu_ms.push(value);
-    }
-    if let Some(value) = diagnostics
-        .get(&UI_GPU_TIME)
-        .and_then(|diagnostic| diagnostic.measurement())
-        .map(|measurement| measurement.value)
-    {
-        samples.ui_gpu_ms.push(value);
-    }
+    let samples = &mut *samples;
+    collect_ui_sample(
+        &diagnostics,
+        &UI_CPU_TIME,
+        &mut samples.last_ui_cpu_measurement,
+        &mut samples.ui_cpu_ms,
+    );
+    collect_ui_sample(
+        &diagnostics,
+        &UI_GPU_TIME,
+        &mut samples.last_ui_gpu_measurement,
+        &mut samples.ui_gpu_ms,
+    );
     if samples.total_ms.len() < BENCHMARK_SAMPLE_FRAMES {
         return;
     }
@@ -361,6 +362,26 @@ fn collect_benchmark(
     exit.write(AppExit::Success);
 }
 
+fn collect_ui_sample(
+    diagnostics: &DiagnosticsStore,
+    path: &DiagnosticPath,
+    last_measurement: &mut Option<Instant>,
+    samples: &mut Vec<f64>,
+) {
+    let Some(measurement) = diagnostics
+        .get(path)
+        .and_then(|diagnostic| diagnostic.measurement())
+    else {
+        return;
+    };
+    // GPU readback can leave the same render measurement visible for several frames.
+    if last_measurement.is_some_and(|time| measurement.time <= time) {
+        return;
+    }
+    *last_measurement = Some(measurement.time);
+    samples.push(measurement.value);
+}
+
 fn compute_latency_percentiles(samples: &mut [f64]) -> (f64, f64) {
     if samples.is_empty() {
         return (f64::NAN, f64::NAN);
@@ -370,4 +391,79 @@ fn compute_latency_percentiles(samples: &mut [f64]) -> (f64, f64) {
         samples[samples.len() / 2],
         samples[samples.len() * 95 / 100],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::diagnostic::{Diagnostic, DiagnosticMeasurement};
+    use core::time::Duration;
+
+    fn add_measurement(app: &mut App, path: DiagnosticPath, time: Instant, value: f64) {
+        let mut diagnostics = app.world_mut().resource_mut::<DiagnosticsStore>();
+        if diagnostics.get(&path).is_none() {
+            diagnostics.add(Diagnostic::new(path.clone()));
+        }
+        diagnostics
+            .get_mut(&path)
+            .unwrap()
+            .add_measurement(DiagnosticMeasurement { time, value });
+    }
+
+    #[test]
+    fn benchmark_records_render_measurements_once_without_skipping_frames() {
+        let mut app = App::new();
+        app.init_resource::<Time<Real>>()
+            .init_resource::<DiagnosticsStore>()
+            .insert_resource(BenchmarkSamples {
+                frame: BENCHMARK_WARMUP_FRAMES - 1,
+                last_update_cpu_ms: 2.0,
+                ..default()
+            })
+            .insert_resource(Args {
+                gradient_count: 1,
+                animate: true,
+                mesh: true,
+                benchmark: true,
+                srgb: false,
+                hsl: false,
+            })
+            .add_message::<AppExit>()
+            .add_systems(Update, collect_benchmark);
+        let first_time = Instant::now();
+        add_measurement(&mut app, UI_CPU_TIME, first_time, 1.0);
+
+        app.update();
+        let samples = app.world().resource::<BenchmarkSamples>();
+        assert!(samples.total_ms.is_empty());
+        assert!(samples.update_cpu_ms.is_empty());
+        assert!(samples.ui_cpu_ms.is_empty());
+
+        app.update();
+        app.update();
+        let samples = app.world().resource::<BenchmarkSamples>();
+        assert_eq!(samples.total_ms.len(), 2);
+        assert_eq!(samples.update_cpu_ms, [2.0, 2.0]);
+        assert_eq!(samples.ui_cpu_ms, [1.0]);
+        assert!(samples.ui_gpu_ms.is_empty());
+
+        let second_time = first_time + Duration::from_millis(1);
+        // An equal value with a new timestamp is still a new measurement.
+        add_measurement(&mut app, UI_CPU_TIME, second_time, 1.0);
+        add_measurement(&mut app, UI_GPU_TIME, second_time, 3.0);
+        app.update();
+        app.update();
+        let samples = app.world().resource::<BenchmarkSamples>();
+        assert_eq!(samples.total_ms.len(), 4);
+        assert_eq!(samples.update_cpu_ms, [2.0, 2.0, 2.0, 2.0]);
+        assert_eq!(samples.ui_cpu_ms, [1.0, 1.0]);
+        assert_eq!(samples.ui_gpu_ms, [3.0]);
+
+        let third_time = second_time + Duration::from_millis(1);
+        add_measurement(&mut app, UI_GPU_TIME, third_time, 4.0);
+        app.update();
+        let samples = app.world().resource::<BenchmarkSamples>();
+        assert_eq!(samples.ui_cpu_ms, [1.0, 1.0]);
+        assert_eq!(samples.ui_gpu_ms, [3.0, 4.0]);
+    }
 }

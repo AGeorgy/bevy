@@ -947,7 +947,9 @@ fn update_responsive_layout(
     let Ok(window) = windows.single() else {
         return;
     };
-    if !window.is_changed() {
+    // Rebuilt previews need the current layout even without a window resize.
+    let root_added = roots.iter_mut().any(|root| root.is_added());
+    if !window.is_changed() && !root_added {
         return;
     }
     let narrow = window.width() < 900.0;
@@ -1053,30 +1055,35 @@ fn sync_editor(
         border.set_all(Color::WHITE);
     }
 
-    if let Some(canvas) = canvas {
+    let edge_display = if state.show_debug_ui {
+        Display::Flex
+    } else {
+        Display::None
+    };
+    let edge_size = canvas.filter(|_| state.show_debug_ui).map(|canvas| {
         let border = canvas.border();
-        let size =
-            (canvas.size() - border.min_inset - border.max_inset) * canvas.inverse_scale_factor();
-        for (edge, mut node, mut transform) in &mut edges {
-            let from = state.mesh.points()[edge.from].position * size;
-            let to = state.mesh.points()[edge.to].position * size;
-            let fraction = edge.dash as f32 / EDGE_DASHES as f32;
-            let next_fraction = (edge.dash as f32 + 0.58) / EDGE_DASHES as f32;
-            let start = from.lerp(to, fraction);
-            let end = from.lerp(to, next_fraction);
-            let delta = end - start;
-            let length = delta.length();
-            let midpoint = (start + end) * 0.5;
-            node.left = px(midpoint.x - length * 0.5);
-            node.top = px(midpoint.y - 0.75);
-            node.width = px(length);
-            node.display = if state.show_debug_ui {
-                Display::Flex
-            } else {
-                Display::None
-            };
-            transform.rotation = Rot2::radians(ops::atan2(delta.y, delta.x));
+        (canvas.size() - border.min_inset - border.max_inset) * canvas.inverse_scale_factor()
+    });
+    for (edge, mut node, mut transform) in &mut edges {
+        if node.display != edge_display {
+            node.display = edge_display;
         }
+        let Some(size) = edge_size else {
+            continue;
+        };
+        let from = state.mesh.points()[edge.from].position * size;
+        let to = state.mesh.points()[edge.to].position * size;
+        let fraction = edge.dash as f32 / EDGE_DASHES as f32;
+        let next_fraction = (edge.dash as f32 + 0.58) / EDGE_DASHES as f32;
+        let start = from.lerp(to, fraction);
+        let end = from.lerp(to, next_fraction);
+        let delta = end - start;
+        let length = delta.length();
+        let midpoint = (start + end) * 0.5;
+        node.left = px(midpoint.x - length * 0.5);
+        node.top = px(midpoint.y - 0.75);
+        node.width = px(length);
+        transform.rotation = Rot2::radians(ops::atan2(delta.y, delta.x));
     }
 
     let selected = state.mesh.points()[state.selected];
@@ -1152,5 +1159,162 @@ fn style_buttons(
             Color::srgb(0.22, 0.27, 0.34)
         };
         border.set_if_neq(BorderColor::all(border_color));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Resource, Default)]
+    struct LayoutChanges(usize);
+
+    fn record_layout_changes(
+        nodes: Query<
+            Entity,
+            (
+                Changed<Node>,
+                Or<(With<EditorRoot>, With<PreviewRow>, With<PreviewColumn>)>,
+            ),
+        >,
+        mut changes: ResMut<LayoutChanges>,
+    ) {
+        changes.0 = nodes.iter().count();
+    }
+
+    fn assert_narrow_layout(world: &mut World) {
+        let mut rows = world.query_filtered::<&Node, With<PreviewRow>>();
+        assert_eq!(rows.iter(world).count(), 1);
+        for row in rows.iter(world) {
+            assert_eq!(row.flex_direction, FlexDirection::Column);
+        }
+        let mut columns = world.query_filtered::<&Node, With<PreviewColumn>>();
+        assert_eq!(columns.iter(world).count(), 2);
+        for column in columns.iter(world) {
+            assert_eq!(column.width, percent(100));
+            assert_eq!(column.height, percent(50));
+        }
+    }
+
+    #[test]
+    fn grid_rebuild_preserves_narrow_layout_without_window_changes() {
+        let mut app = App::new();
+        app.insert_resource(EditorState::new())
+            .init_resource::<LayoutChanges>()
+            .add_systems(
+                Update,
+                (
+                    rebuild_editor,
+                    update_responsive_layout,
+                    record_layout_changes,
+                )
+                    .chain(),
+            );
+        app.world_mut().spawn((
+            PrimaryWindow,
+            Window {
+                resolution: (800, 600).into(),
+                ..default()
+            },
+        ));
+
+        app.update();
+        assert_narrow_layout(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<LayoutChanges>().0, 0);
+
+        app.world_mut()
+            .resource_mut::<EditorState>()
+            .replace_grid(3, 3);
+        app.update();
+        assert_narrow_layout(app.world_mut());
+        assert_eq!(app.world().resource::<LayoutChanges>().0, 4);
+        app.update();
+        assert_eq!(app.world().resource::<LayoutChanges>().0, 0);
+    }
+
+    #[derive(Resource, Default)]
+    struct EdgeChanges {
+        node: bool,
+        transform: bool,
+    }
+
+    fn record_edge_changes(
+        edges: Query<(Ref<Node>, Ref<UiTransform>), With<ControlEdge>>,
+        mut changes: ResMut<EdgeChanges>,
+    ) {
+        let (node, transform) = edges.single().unwrap();
+        changes.node = node.is_changed();
+        changes.transform = transform.is_changed();
+    }
+
+    #[test]
+    fn hidden_edges_keep_geometry_until_debug_ui_is_shown() {
+        let mut app = App::new();
+        app.insert_resource(EditorState::new())
+            .init_resource::<EdgeChanges>()
+            .add_systems(Update, (sync_editor, record_edge_changes).chain());
+        let canvas = app
+            .world_mut()
+            .spawn((
+                EditorCanvas,
+                ComputedNode {
+                    size: Vec2::new(400.0, 300.0),
+                    ..default()
+                },
+            ))
+            .id();
+        let edge = app
+            .world_mut()
+            .spawn((
+                ControlEdge {
+                    from: 0,
+                    to: 1,
+                    dash: 0,
+                },
+                Node::default(),
+                UiTransform::IDENTITY,
+            ))
+            .id();
+        app.update();
+        let visible_node = app.world().get::<Node>(edge).unwrap().clone();
+        let visible_transform = *app.world().get::<UiTransform>(edge).unwrap();
+
+        app.world_mut().resource_mut::<EditorState>().show_debug_ui = false;
+        app.update();
+        let hidden_node = app.world().get::<Node>(edge).unwrap().clone();
+        assert_eq!(hidden_node.display, Display::None);
+        assert_eq!(hidden_node.width, visible_node.width);
+        assert!(app.world().resource::<EdgeChanges>().node);
+        assert!(!app.world().resource::<EdgeChanges>().transform);
+
+        {
+            let mut state = app.world_mut().resource_mut::<EditorState>();
+            let mut point = state.mesh.points()[1];
+            point.position = Vec2::new(0.5, 0.25);
+            state.accept_point(1, point, "hidden point edit");
+        }
+        app.world_mut()
+            .get_mut::<ComputedNode>(canvas)
+            .unwrap()
+            .size = Vec2::new(800.0, 600.0);
+        app.update();
+        assert_eq!(app.world().get::<Node>(edge).unwrap(), &hidden_node);
+        assert_eq!(
+            app.world().get::<UiTransform>(edge).unwrap(),
+            &visible_transform
+        );
+        assert!(!app.world().resource::<EdgeChanges>().node);
+        assert!(!app.world().resource::<EdgeChanges>().transform);
+
+        app.world_mut().resource_mut::<EditorState>().show_debug_ui = true;
+        app.update();
+        let node = app.world().get::<Node>(edge).unwrap();
+        assert_eq!(node.display, Display::Flex);
+        assert_ne!(node.width, visible_node.width);
+        assert_ne!(
+            app.world().get::<UiTransform>(edge).unwrap().rotation,
+            visible_transform.rotation
+        );
     }
 }
